@@ -1,0 +1,80 @@
+# ==========================================
+# 1. uv 与虚拟环境 (Virtual Environments)
+# ==========================================
+.venv/
+venv/
+env/
+ENV/
+*.venv
+
+# ⚠️ 注意关于 uv.lock 的重要规则：
+# 对于 AI Agent / 应用 / Web 服务项目，【绝对不要】忽略 uv.lock！
+# uv.lock 必须提交到 Git，以确保团队协作与容器部署的环境 100% 字节级一致。
+# （仅当你开发的是需要发布到 PyPI 的开源通用库时，才取消下一行的注释）
+# uv.lock
+
+# ==========================================
+# 2. 环境变量与敏感信息 (Environment & Secrets)
+# ==========================================
+.env
+.env.*
+!.env.example  # 保留配置文件模板供团队参考
+
+# ==========================================
+# 3. Python 运行缓存与编译文件
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+
+# ==========================================
+# 4. 构建、打包与依赖导出 (Distribution / Build)
+# ==========================================
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ==========================================
+# 5. 代码校验、测试与缓存 (Testing & Tools Cache)
+# ==========================================
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.cache/
+
+# ==========================================
+# 6. IDE、编辑器与系统文件
+# ==========================================
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.swp
+*~
+
+# ==========================================
+# 7. 日志与 Jupyter 缓存
+# ==========================================
+*.log
+logs/
+.ipynb_checkpoints
