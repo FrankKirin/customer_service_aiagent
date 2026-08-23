@@ -1,4 +1,4 @@
-from state import AgentState
+from ..state import AgentState
 
-async def QuoteNode(state: AgentState):
+async def quote_node(state: AgentState):
     pass

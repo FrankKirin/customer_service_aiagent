@@ -1,12 +1,12 @@
 # 负责搭建图
 from langgraph.graph import StateGraph, START, END
 from llm.base_llm import get_llm
-from state import AgentState
-from nodes.faq_node import FAQNode
-from nodes.general_node import GeneralNode
-from nodes.quote_node import QuoteNode
-from nodes.intent_node import IntentNode
-from router import route_by_intent
+from .state import AgentState   # 同目录下使用相对导入
+from .nodes.faq_node import faq_node
+from .nodes.general_node import general_node
+from .nodes.quote_node import quote_node
+from .nodes.intent_node import intent_node
+from .router import route_by_intent
 from langchain_core.messages import HumanMessage
 
 llm = get_llm()
@@ -14,10 +14,10 @@ llm = get_llm()
 def build_agent_graph():
     graph = StateGraph(AgentState)
 
-    graph.add_node("intent_node", IntentNode)
-    graph.add_node("faq_node", FAQNode)
-    graph.add_node("quote_node", QuoteNode)
-    graph.add_node("general_node", GeneralNode)
+    graph.add_node("intent_node", intent_node)
+    graph.add_node("faq_node", faq_node)
+    graph.add_node("quote_node", quote_node)
+    graph.add_node("general_node", general_node)
 
     graph.add_edge(START, "intent_node")
     graph.add_conditional_edges(
@@ -30,17 +30,22 @@ def build_agent_graph():
     graph.add_edge("general_node", END)
 
     return graph.compile()
-    
-if __name__ == "__main__":
+
+async def main(query: str):
     workflow = build_agent_graph()
-    query = "你是什么模型，具体的名字是什么?"
-    result = workflow({
-        "messages": HumanMessage(content=query),
+    result = await workflow.ainvoke({
+        "messages": [HumanMessage(content=query)],
         "original_query": query,
         "intent": "",
-        "final_answer": ""
+        "final_answer": "" 
     })
     print(result["final_answer"])
+
+    
+if __name__ == "__main__":
+    import asyncio
+    query = "长滩到上海的40高柜多少钱?"
+    asyncio.run(main(query))
 
 # class AgentState(TypedDict):
 #     messages: Annotated[list[AnyMessage], operator.add]

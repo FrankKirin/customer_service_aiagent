@@ -4,21 +4,31 @@ from config.settings import settings
 from fastapi import HTTPException
 from core.logger import logger
 from collections.abc import AsyncGenerator
+from typing import Literal
 
-def get_llm() -> ChatOpenAI:
-    return ChatOpenAI(
-        model=settings.llm_model,
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        timeout=settings.llm_timeout,
-        max_retries=settings.max_retry_time    
-    )
+def get_llm(mode: str = "normal"):
+    client = ChatOpenAI(
+            model=settings.llm_model,
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            timeout=settings.llm_timeout,
+            max_retries=settings.max_retry_time,
+        )
+    if mode == "normal":
+        return client
+    elif mode == "json":
+        json_client = client.bind(response_format={"type": "json_object"})
+        return json_client
+
+# 避免在node节点中反复创建llm
+llm = get_llm("normal")
+json_llm = get_llm("json")
+
 
 def get_embedding():
     pass
 
 async def chat_normal(query: str):
-
     llm = get_llm()
 
     try:
@@ -42,5 +52,6 @@ async def chat_stream(query: str) -> AsyncGenerator:
 
 if __name__ == "__main__":
     import asyncio
-    query = "你是什么模型，具体的名字叫什么"
-    asyncio.run(chat_stream(query))
+    query = "你是什么模型，具体的名字叫什么, 输出JSON给我"
+    json_llm = get_llm("json")
+    print(json_llm.invoke(query).content)
