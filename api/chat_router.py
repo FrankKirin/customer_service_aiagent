@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
-from core.base_llm import chat_stream
+from llm.base_llm import chat_stream
 
 router = APIRouter()
 

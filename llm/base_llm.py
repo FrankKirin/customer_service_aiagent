@@ -1,6 +1,6 @@
 # 流式传输
 from langchain_openai import ChatOpenAI
-from config.settings import settings
+from settings import settings
 from fastapi import HTTPException
 from core.logger import logger
 from collections.abc import AsyncGenerator

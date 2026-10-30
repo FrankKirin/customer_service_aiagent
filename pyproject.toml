@@ -103,6 +103,7 @@ dependencies = [
     "pypdf==6.14.2",
     "pypika==0.51.1",
     "pyproject-hooks==1.2.0",
+    "pytest>=9.1.1",
     "python-dateutil==2.9.0.post0",
     "python-dotenv==1.2.2",
     "python-multipart==0.0.32",
@@ -150,3 +151,12 @@ customer-service-aiagent = "customer_service_aiagent:main"
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
