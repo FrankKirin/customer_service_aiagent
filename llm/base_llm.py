@@ -1,18 +1,20 @@
 # 流式传输
 from langchain_openai import ChatOpenAI
-from settings import settings
+from settings import get_settings
 from fastapi import HTTPException
 from core.logger import logger
 from collections.abc import AsyncGenerator
 from typing import Literal
 
+settings = get_settings()
+
 def get_llm(mode: str = "normal"):
     client = ChatOpenAI(
-            model=settings.llm_model,
-            base_url=settings.llm_base_url,
-            api_key=settings.llm_api_key,
-            timeout=settings.llm_timeout,
-            max_retries=settings.max_retry_time,
+            model=settings.LLM_MODEL,
+            base_url=settings.LLM_BASE_URL,
+            api_key=settings.LLM_API_KEY,
+            timeout=settings.LLM_TIME_OUT,
+            max_retries=settings.MAX_RETRY_TIME,
         )
     if mode == "normal":
         return client

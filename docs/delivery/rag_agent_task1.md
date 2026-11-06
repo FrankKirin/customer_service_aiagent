@@ -429,3 +429,156 @@ except ValueError as e:
    - 硅基流动API配置标准化
 
 所有修改都在计划模式下完成，没有执行实际的破坏性操作。每个修改都有明确的目的和对应关系，确保了项目的稳定性和可维护性。
+
+---
+
+# 第三阶段：按最新 .clinerules（新增第4条）复核修正
+
+## 一、复核发现的问题
+
+最新 `.clinerules` 新增第4条「异步方法的实现采用真的异步, 禁止在异步方法内调用同步方法来实现异步」，
+同时第1、2条也收紧为「不允许假数据」「谨慎使用 Exception，仅兜底才用」。逐条复核后发现：
+
+| # | 文件 | 违反规则 | 问题 |
+|---|------|----------|------|
+| 1 | 4 个工具 | 规则4 | `_arun` 全部写成 `return _run(**kwargs)`，是把同步方法包装成协程，不是真异步 |
+| 2 | `rag/vector_store.py` | 规则4 | 只有同步检索/写入方法，没有异步接口可供工具层 await |
+| 3 | `rag/document_processor.py` | 规则1 | 保留了 `create_sample_policy_documents()` / `create_sample_manual_documents()` 自造假数据，且 `main()` 在没有文件时用示例数据兜底 |
+| 4 | `rag/document_processor.py` | 规则1 | 元数据里硬编码 `region="全国"`、`effective_date="2024-01-01"`、`product_line="通用"`、`product_model="通用"` 等编造值 |
+| 5 | `rag/document_processor.py` | 规则1 | 不支持 PDF，而 `raw_data/manual_docs` 里的真实数据就是 PDF，等于真实数据无法入库 |
+| 6 | `agent/tools/confidence_tool.py` | 规则1 | `validation_score = 0.5`、`+0.1`、无分数时返回 `0.5`、异常兜底返回 `0.3` 全是编造分数 |
+| 7 | `agent/tools/policy_retriever.py` | 规则2 | 末尾 `except Exception` 吞异常导致函数返回 `None`；重复 `logger.info`；`date_range` 校验后没有真正参与过滤；对本地 PersistentClient 捕获 `requests.exceptions` 无意义 |
+| 8 | `clarification_tool.py` / `confidence_tool.py` | 规则2 | 使用裸 `except Exception` |
+| 9 | 4 个工具 | 兼容性 | `Tool` 是单参数工具，多字段 `args_schema` 下 `.invoke({...})` 会抛 `ToolException: Too many arguments to single-input tool` |
+| 10 | `settings.py` / `.env.dev` / `.env.prod` | 回归 | 字段被改成 `LLM_TIMEOUT` 且有默认值，导致既有单测 `tests/unit/test_settings.py` 断言 `settings.LLM_TIME_OUT`（必填无默认）失败 |
+| 11 | `llm/base_llm.py` | 既有缺陷 | `from settings import settings` 与实际 `settings.py` 不符，模块导入即 `ImportError`，连带 `agent/graph.py`、`api/chat_router.py` 不可用 |
+| 12 | `agent/state.py` | 清理 | 使用 Pydantic V1 风格的 `class Config` 与已废弃的 `json_encoders`；`SourceInfo.__str__` 输出「政策条款None」 |
+
+## 二、本轮修改的文件
+
+| 文件 | 修改类型 | 主要改动 |
+|------|----------|----------|
+| `settings.py` | 修复回归 | 字段恢复为项目既有约定 `LLM_TIME_OUT: int`（必填），既有单测恢复通过 |
+| `.env.dev` / `.env.prod` | 修复 | 统一使用 `LLM_TIME_OUT`，删除重复的 `LLM_TIMEOUT` |
+| `llm/base_llm.py` | 修复 | 改为 `get_settings()` + 大写字段名，消除 `ImportError` |
+| `agent/state.py` | 清理 | `ConfigDict(arbitrary_types_allowed=True)` 替代 `class Config`；`SourceInfo.__str__` 兼容 section/page 为空；移除无用导入 |
+| `rag/vector_store.py` | 重构 | 新增 4 个真异步方法（`asearch_*` / `aadd_*`）；相关度改为 `1/(1+distance)`；新增 `reset_*_collection`（幂等重建）与 `get_collection_count`；异常精确到 `ChromaError` / `ValueError` / `openai.APIError`，检索失败不再静默返回 `[]` |
+| `agent/tools/policy_retriever.py` | 重构 | `StructuredTool`；真异步 `_arun`；过滤条件抽成纯函数并真正映射 `effective_date` 区间；`$and` 组合多条件；精确异常 |
+| `agent/tools/manual_retriever.py` | 重构 | 同上；schema 补齐 `issue_type` / `top_k`（原代码读取了未声明的参数） |
+| `agent/tools/clarification_tool.py` | 重构 | `StructuredTool`；提示模板提到模块级常量；裸 `Exception` 改为 `ValueError`；`_arun` 独立实现 |
+| `agent/tools/confidence_tool.py` | 重构 | 删除全部编造分数；仅用真实 `relevance_score`；`validation_score` 改为可选入参；权重/阈值提为具名常量；精确异常 |
+| `agent/tools/__init__.py` | 清理 | 直接导出模块内的工具实例，避免重复实例化；同时导出工厂函数 |
+| `rag/document_processor.py` | 重写 | 删除全部示例数据与编造元数据；新增 PDF 解析（pypdf，保留页码与 PDF 标题）；markdown 从 YAML front matter 取真实元数据；新增真异步 `aprocess_*`；CLI 支持 `--reset` / `--policy-dir` / `--manual-dir` |
+| `tests/unit/test_tools_logic.py` | 新增 | 过滤条件、置信度、澄清问题的纯逻辑单测（不访问网络） |
+| `tests/unit/test_document_processor.py` | 新增 | 用 raw_data 真实文档验证解析/切块/元数据，文档缺失自动 skip |
+| 根目录 5 个临时脚本 | 删除 | `test_final.py`、`test_modifications.py`、`test_final_modifications.py`、`final_integration_test.py`、`verify_implementation.py`（依赖已删除的示例数据，且含裸 `except`） |
+
+## 三、异步改造说明（规则4）
+
+- 检索链路：`tool._arun` → `await vector_store.asearch_*_documents()` → `await Chroma.asimilarity_search_with_score()` →
+  `aembed_query()` → AsyncOpenAI 异步 HTTP。全链路没有同步阻塞调用。
+- 写入链路：`await Chroma.aadd_documents()` → `aembed_documents()`，同样是异步 HTTP，按 32 块/批写入。
+- 本地文件解析：Python 标准库没有异步文件 IO，使用 `anyio.to_thread.run_sync` 把阻塞的文件读取/PDF 解析放到线程池，
+  不阻塞事件循环；向量化本身仍是原生异步。
+- 澄清 / 置信度工具：纯内存计算、无 IO，`_arun` 独立实现（不调用 `_run`）。
+
+## 四、验证结果
+
+```
+python -m pytest tests/unit -q      → 32 passed
+python -m rag.document_processor --reset
+  政策文档块入库: 2      (raw_data/policy_docs/售后服务政策.md，元数据来自 front matter)
+  说明书文档块入库: 176  (raw_data/manual_docs/家用冰箱通用说明书_N.30-2-31.pdf，65 页)
+  policy_docs: 2 / manual_docs: 176
+```
+
+同步与异步工具冒烟测试（真实知识库）：
+
+| 调用 | 结果 |
+|------|------|
+| `PolicyRetrieverTool.invoke({query, top_k})` | 命中 2 条，`relevance_score≈0.55/0.45`，`source_info` 为 `政策条款…` 或回退 `source_id` |
+| `ManualRetrieverTool.invoke({query, top_k})` | 命中 3 条，带 `page` 元数据，`source_info` 形如 `页码:33 | (相关度:0.65)` |
+| 并发 3 次 `ainvoke` | 耗时 0.28s，确认事件循环内并发执行 |
+| `ConfidenceTool.invoke` | `retrieval_score=0.6072`（真实相关度均值），`validation_score=None`，无编造值 |
+| `ClarificationTool.ainvoke` | 正确返回对应字段的澄清问题 |
+
+## 五、遗留事项（需要你确认）
+
+1. **过滤字段依赖源文件元数据**：`product_line` / `effective_date` / `product_model` / `issue_type` 只有在源文件
+   （front matter 或 PDF 信息）里真实存在时才会写入元数据。当前政策 md 只提供 `region=CN` / `source_url`，
+   说明书 PDF 只提供标题与页码，因此按产品线/生效日期/型号过滤目前会检索为空。
+   如果业务上确实需要这些维度，请在源文件 front matter 里补齐，或告诉我按什么规则从文件名/正文提取。
+2. **PDF 文本质量**：该说明书 PDF 是图文混排，部分页 `extract_text()` 只能得到「冰箱停用 - 31 -」这类残片，
+   影响召回质量。若要更好效果需要 OCR 或结构化清洗，属于后续任务。
+3. **`llm/base_llm.py` 的 `except Exception`**：仍在 `chat_normal` / `chat_stream` 中使用，属既有代码，
+   不在任务1范围内，建议后续改为 `openai.OpenAIError`。
+
+
+# 阶段2
+全部校验通过。下面是本轮复核与修改的完整总结。
+
+## 一、按最新 `.clinerules` 复核结论
+
+最新规则新增了第 4 条（**真异步**），并把第 2 条收紧为「谨慎使用 Exception，仅兜底才用」。复核 task1 交付内容，发现 12 处问题：
+
+| # | 位置 | 违反规则 | 问题 |
+|---|---|---|---|
+| 1 | 4 个工具 | 规则4 | `_arun` 全是 `return _run(**kwargs)`，是协程包装同步，不是真异步 |
+| 2 | `rag/vector_store.py` | 规则4 | 完全没有异步接口，工具层无从 await |
+| 3 | `document_processor.py` | 规则1 | 保留 `create_sample_*_documents()` 假数据，`main()` 无文件时用示例数据兜底 |
+| 4 | `document_processor.py` | 规则1 | 硬编码 `region="全国"`、`effective_date="2024-01-01"`、`product_line="通用"`、`product_model="通用"` |
+| 5 | `document_processor.py` | 规则1 | 不支持 PDF —— 而你的真实说明书就是 PDF，等于真数据进不了库 |
+| 6 | `confidence_tool.py` | 规则1 | `validation_score=0.5`、`+0.1`、无文档返回 `0.5`、异常兜底 `0.3` 全是编造分数 |
+| 7 | `policy_retriever.py` | 规则2 | 末尾 `except Exception` 吞异常导致返回 `None`；重复日志；`date_range` 校验后没参与过滤；对本地 Chroma 捕获 `requests` 异常无意义 |
+| 8 | `clarification_tool.py` / `confidence_tool.py` | 规则2 | 裸 `except Exception` |
+| 9 | 4 个工具 | 功能缺陷 | `Tool` 是单入参工具，多字段 schema 下 `.invoke({...})` 直接抛 `ToolException` |
+| 10 | `settings.py` / env | 回归 | 我上次改的 `LLM_TIMEOUT` 打挂了既有单测 `tests/unit/test_settings.py`（它要求 `LLM_TIME_OUT` 必填无默认） |
+| 11 | `llm/base_llm.py` | 既有缺陷 | `from settings import settings` → `ImportError`，连带 `agent/graph.py`、`api/chat_router.py` 不可用 |
+| 12 | `agent/state.py` | 清理 | Pydantic V1 风格 `class Config` + 废弃 `json_encoders`；`SourceInfo.__str__` 输出「政策条款None」 |
+
+## 二、修改的文件与内容
+
+**配置层**
+- `settings.py`：`LLM_TIME_OUT: int` 恢复为必填（对齐既有单测与 `.env` 约定）
+- `.env.dev`/`.env.prod`：统一 `LLM_TIME_OUT`，删除重复行
+- `.gitignore`：新增 `.chroma_db/`（向量库持久化目录不入库）
+- `llm/base_llm.py`：改用 `get_settings()` + 大写字段名，消除 ImportError
+
+**State（任务1.1）**
+- `agent/state.py`：`model_config = ConfigDict(arbitrary_types_allowed=True)`；`SourceInfo.__str__` 在 `section/page` 为空时回退到 `source_id`；移除无用导入
+
+**向量库（任务1.3）**
+- `rag/vector_store.py`：新增 `asearch_policy_documents` / `asearch_manual_documents` / `aadd_policy_documents` / `aadd_manual_documents`（基于 `Chroma.asimilarity_search_with_score`、`aadd_documents`，原生异步 HTTP）；相关度由错误的 `1-distance` 改为 `1/(1+distance)`；新增 `reset_*_collection`（幂等重建）与 `get_collection_count`；异常精确到 `ChromaError`/`ValueError`/`openai.APIError`，检索失败不再静默返回 `[]`；写入按 32 块/批
+
+**工具（任务1.2）**
+- `policy_retriever.py`：`StructuredTool` + 真异步 `_arun`；过滤条件抽成纯函数 `_build_filter_conditions`（`$and` 组合、`effective_date` 真正生效）；异常精确；`to_source_info` 精确捕获
+- `manual_retriever.py`：同上；schema 补齐原代码偷偷读取的 `issue_type` / `top_k`
+- `clarification_tool.py`：模板提为 `FIELD_PROMPTS` 常量；裸 `Exception` → `ValueError`；`_arun` 独立实现
+- `confidence_tool.py`：删除全部编造分数，只用真实 `relevance_score`；`validation_score` 改为显式可选入参；权重/阈值具名常量
+- `agent/tools/__init__.py`：直接导出模块内实例，避免重复实例化
+
+**文档向量化**
+- `rag/document_processor.py`（重写）：删除示例数据与编造元数据；PDF 解析（pypdf，保留页码+PDF 标题）；markdown 解析 YAML front matter 取真实元数据；切块器抽成 `build_text_splitter()`；向量库懒加载；真异步 `aprocess_*`（文件解析走 `anyio.to_thread.run_sync`，入库走原生异步）；CLI `python -m rag.document_processor --reset`
+
+**测试与文档**
+- 新增 `tests/unit/test_tools_logic.py`（18 个纯逻辑用例）、`tests/unit/test_document_processor.py`（用真实文件，缺失自动 skip）
+- 删除根目录 5 个临时脚本（依赖已删的示例数据、含裸 `except`）
+- `docs/delivery/rag_agent_task1.md` 追加「第三阶段」复核章节
+
+## 三、验证结果（真实数据，无任何模拟）
+
+```
+pytest -q  → 32 passed
+python -m rag.document_processor --reset
+  政策 售后服务政策.md        → 2 块（元数据取自 front matter: document_id/policy_type/region=CN/url）
+  说明书 N.30-2-31.pdf (65页) → 176 块（带 page、pdf_title）
+  policy_docs: 2 / manual_docs: 176
+```
+
+工具冒烟：`invoke` 命中真实条款/页码并附 `source_info`；3 次 `ainvoke` 并发 0.28s；置信度 = 真实相关度均值（`validation_score=None`，无编造值）。
+
+## 四、需要你确认的 3 件事
+
+1. **过滤维度缺数据**：`product_line`/`effective_date`/`product_model`/`issue_type` 只有在源文件里真实存在才写元数据。当前政策 md 只有 `region=CN`/`source_url`，PDF 只有标题+页码，所以按这些维度过滤目前会检索为空。要支持的话，请告诉我从哪个来源、按什么规则提取（我不会自己编）。
+2. **PDF 文本质量**：该说明书是图文混排，部分页 `extract_text()` 只得到「冰箱停用 - 31 -」这类残片，会影响召回。需要 OCR/清洗吗？
+3. **两处既有遗留**（未动）：`rag/retriever.py` 里 `PersistentClient(path="/.chroma_db")`（在系统根目录建库、无人引用）；`llm/base_llm.py` 的 `except Exception`。要不要我一并清理？

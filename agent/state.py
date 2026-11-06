@@ -1,8 +1,7 @@
 import operator
 from typing import Annotated, TypedDict, Optional, List, Dict, Any, Literal
 from datetime import datetime
-from pydantic import BaseModel, Field
-from langgraph.graph import StateGraph
+from pydantic import BaseModel, ConfigDict, Field
 from langchain.messages import AnyMessage
 from langchain_core.documents import Document
 
@@ -22,16 +21,17 @@ class SourceInfo(BaseModel):
         """友好的字符串表示"""
         parts = []
         if self.source_type == "policy":
-            parts.append(f"政策条款{self.section}")
+            if self.section:
+                parts.append(f"政策条款{self.section}")
         elif self.source_type == "manual":
             if self.section:
                 parts.append(f"说明章节:{self.section}")
             if self.page:
                 parts.append(f"页码:{self.page}")
-        
+
         if self.relevance_score > 0:
             parts.append(f"(相关度:{self.relevance_score:.2f})")
-        
+
         return " | ".join(parts) if parts else self.source_id
 
 
@@ -82,13 +82,9 @@ class SharedState(BaseModel):
     
     # LangGraph需要的历史消息
     messages: Annotated[List[AnyMessage], operator.add] = Field(default_factory=list, description="消息历史")
-    
-    class Config:
-        """Pydantic配置"""
-        arbitrary_types_allowed = True  # 是否允许任意类型
-        json_encoders = {
-            datetime: lambda v: v.isoformat(),
-        }
+
+    # 文档片段是第三方类型, 需要允许任意类型; datetime 由 Pydantic V2 直接序列化成 ISO 字符串
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 # 政策问答专用State
