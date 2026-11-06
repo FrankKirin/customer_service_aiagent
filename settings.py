@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str
     LLM_MODEL: str = "deepseek-ai/DeepSeek-V3.2"
     LLM_API_KEY: str
-    LLM_TIME_OUT: int
+    LLM_TIMEOUT: int = 60
     MAX_RETRY_TIME: int
 
     # Embedding模型接入
