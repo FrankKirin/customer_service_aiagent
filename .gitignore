@@ -83,3 +83,8 @@ logs/
 # 8. 向量数据库持久化目录
 # ==========================================
 .chroma_db/
+
+# 知识库运行时生成的构建/质量报告与 caption 缓存
+reports/
+caption_cache.json
+.aider*

@@ -13,6 +13,7 @@ from agent.tools.confidence_tool import (
 )
 from agent.tools.manual_retriever import _build_filter_conditions as build_manual_filters
 from agent.tools.policy_retriever import _build_filter_conditions as build_policy_filters
+from rag.vector_store import _normalize_filter_conditions
 
 
 # ------------------------------------------------------------------ 政策过滤条件
@@ -31,6 +32,31 @@ def test_policy_filter_maps_date_range_to_effective_date():
     """时间范围映射成 effective_date 的区间比较"""
     result = build_policy_filters(None, None, (datetime(2024, 1, 1), datetime(2024, 12, 31)))
     assert result == {"effective_date": {"$gte": "2024-01-01", "$lte": "2024-12-31"}}
+
+
+def test_date_filter_is_normalized_to_numeric_for_chroma():
+    old_shape = {"effective_date": {"$gte": "2024-01-01", "$lte": "2024-12-31"}}
+    assert _normalize_filter_conditions(old_shape) == {
+        "$and": [
+            {"effective_date_num": {"$gte": 20240101}},
+            {"effective_date_num": {"$lte": 20241231}},
+        ]
+    }
+
+    combined = {
+        "$and": [
+            {"product_line": "家用电器"},
+            {"effective_date": {"$gte": "2024-01-01"}},
+            {"effective_date": {"$lte": "2024-12-31"}},
+        ]
+    }
+    assert _normalize_filter_conditions(combined) == {
+        "$and": [
+            {"product_line": "家用电器"},
+            {"effective_date_num": {"$gte": 20240101}},
+            {"effective_date_num": {"$lte": 20241231}},
+        ]
+    }
 
 
 def test_policy_filter_rejects_reversed_date_range():

@@ -23,6 +23,7 @@ def clean_settings_env(monkeypatch):
         "EMBEDDING_BASE_URL",
         "EMBEDDING_API_KEY",
         "EMBEDDING_MODEL",
+        "VISION_MODEL",
     ]
     # 删除环境变量
     for env_key in env_keys:

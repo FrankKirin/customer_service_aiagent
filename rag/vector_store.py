@@ -9,9 +9,11 @@
 """
 
 import os
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import anyio.to_thread
 import chromadb
 import openai
 from chromadb.config import Settings
@@ -69,6 +71,62 @@ def _to_documents(results: Sequence[Tuple[Document, float]]) -> List[Document]:
 def _chunked(documents: List[Document], batch_size: int = ADD_BATCH_SIZE) -> List[List[Document]]:
     """按批切分文档, 供写入向量库时使用"""
     return [documents[i:i + batch_size] for i in range(0, len(documents), batch_size)]
+
+
+def _date_to_number(value: Any) -> int:
+    """把 ISO 日期转换成 YYYYMMDD 整数，供 Chroma 的数值区间过滤使用。"""
+    if isinstance(value, datetime):
+        return int(value.date().strftime("%Y%m%d"))
+    if isinstance(value, date):
+        return int(value.strftime("%Y%m%d"))
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(datetime.fromisoformat(value).date().strftime("%Y%m%d"))
+        except ValueError as e:
+            raise ValueError(f"effective_date 不是合法 ISO 日期: {value}") from e
+    raise ValueError(f"effective_date 过滤值类型不支持: {type(value).__name__}")
+
+
+def _normalize_filter_conditions(conditions: Dict[str, Any]) -> Dict[str, Any]:
+    """把 effective_date 字符串区间转换成 Chroma 可执行的数值区间。
+
+    Chroma 1.x 的 ``$gte/$lte`` 只接受 int/float，而 policy_retriever 用
+    ISO 字符串构造更易读的过滤条件；这里在进入 Chroma 前统一转换，并确保
+    单个字段的多个操作符用 ``$and`` 拆开。
+    """
+    if "$and" in conditions:
+        normalized: List[Dict[str, Any]] = []
+        for item in conditions["$and"]:
+            child = _normalize_filter_conditions(item)
+            if set(child) == {"$and"}:
+                normalized.extend(child["$and"])
+            else:
+                normalized.append(child)
+        return {"$and": normalized}
+
+    if "$or" in conditions:
+        return {"$or": [_normalize_filter_conditions(item) for item in conditions["$or"]]}
+
+    if "effective_date" in conditions and isinstance(conditions["effective_date"], dict):
+        date_conditions: List[Dict[str, Any]] = []
+        for operator, value in conditions["effective_date"].items():
+            date_conditions.append(
+                {"effective_date_num": {operator: _date_to_number(value)}}
+            )
+
+        other_conditions = [
+            {key: value}
+            for key, value in conditions.items()
+            if key != "effective_date"
+        ]
+        date_conditions = other_conditions + date_conditions
+        if len(date_conditions) == 1:
+            return date_conditions[0]
+        return {"$and": date_conditions}
+
+    return conditions
 
 
 class VectorStoreManager:
@@ -157,6 +215,8 @@ class VectorStoreManager:
     ) -> List[Document]:
         """同步检索的公共实现"""
         # [(document1, score1), (document2, score2)], 分数越低越相似
+        if filter_conditions:
+            filter_conditions = _normalize_filter_conditions(filter_conditions)
         try:
             results = collection.similarity_search_with_score(
                 query=query,
@@ -184,6 +244,8 @@ class VectorStoreManager:
         top_k: int,
     ) -> List[Document]:
         """真异步检索: 直接 await 底层异步检索接口(embedding 走异步 HTTP)"""
+        if filter_conditions:
+            filter_conditions = _normalize_filter_conditions(filter_conditions)
         try:
             results = await collection.asimilarity_search_with_score(
                 query=query,
@@ -239,7 +301,15 @@ class VectorStoreManager:
 
     # ------------------------------------------------------------------ 写入
     def _add(self, collection: Chroma, collection_name: str, documents: List[Document]) -> List[str]:
-        """同步写入的公共实现, 分批入库"""
+        """同步写入的公共实现。
+
+        新版文档块自带稳定 chunk_id 时优先走 upsert；旧调用方没有 ID 时仍走
+        add_documents，保持兼容。
+        """
+        stable_ids = [document.metadata.get("chunk_id") for document in documents]
+        if documents and all(isinstance(chunk_id, str) and chunk_id for chunk_id in stable_ids):
+            return self._upsert(collection_name, documents, [str(chunk_id) for chunk_id in stable_ids])
+
         ids: List[str] = []
         for batch in _chunked(documents):
             try:
@@ -258,7 +328,13 @@ class VectorStoreManager:
         return ids
 
     async def _aadd(self, collection: Chroma, collection_name: str, documents: List[Document]) -> List[str]:
-        """真异步写入: 直接 await 底层异步写入接口(embedding 走异步 HTTP)"""
+        """真异步写入：有稳定 chunk_id 时走 upsert，旧文档走异步 add。"""
+        stable_ids = [document.metadata.get("chunk_id") for document in documents]
+        if documents and all(isinstance(chunk_id, str) and chunk_id for chunk_id in stable_ids):
+            return await self._aupsert(
+                collection_name, documents, [str(chunk_id) for chunk_id in stable_ids]
+            )
+
         ids: List[str] = []
         for batch in _chunked(documents):
             try:
@@ -290,6 +366,190 @@ class VectorStoreManager:
     async def aadd_manual_documents(self, documents: List[Document]) -> List[str]:
         """异步添加说明书文档"""
         return await self._aadd(self.manual_collection, MANUAL_COLLECTION_NAME, documents)
+
+
+    # ------------------------------------------------------- upsert / 增量清理
+    def _get_native_collection(self, collection_name: str) -> Any:
+        """获取 Chroma 原生集合，用于按稳定 ID upsert。"""
+        try:
+            return self.client.get_or_create_collection(name=collection_name)
+        except chromadb.errors.ChromaError as e:
+            logger.error("获取原生向量集合失败", collection=collection_name, error=str(e))
+            raise
+
+    @staticmethod
+    def _validate_upsert_input(documents: List[Document], ids: List[str]) -> None:
+        if len(documents) != len(ids):
+            raise ValueError(
+                f"documents 与 ids 数量不一致: documents={len(documents)}, ids={len(ids)}"
+            )
+        if len(ids) != len(set(ids)):
+            raise ValueError("写入 ID 存在重复，无法保证幂等写入")
+
+        for document in documents:
+            for key, value in document.metadata.items():
+                if value is None or isinstance(value, (list, dict, tuple, set)):
+                    raise ValueError(
+                        f"向量元数据 {key} 必须是 str/int/float/bool 标量, "
+                        f"当前为 {type(value).__name__}"
+                    )
+
+    def _upsert_sync_batch(
+        self,
+        collection_name: str,
+        ids: List[str],
+        documents: List[str],
+        metadatas: List[Dict[str, Any]],
+        embeddings: List[List[float]],
+    ) -> None:
+        """在线程池中执行 Chroma 原生 upsert（阻塞调用）。"""
+        collection = self._get_native_collection(collection_name)
+        try:
+            collection.upsert(
+                ids=ids,
+                embeddings=embeddings,
+                documents=documents,
+                metadatas=metadatas,
+            )
+        except chromadb.errors.ChromaError as e:
+            logger.error("向量 upsert 失败", collection=collection_name, error=str(e))
+            raise
+        except ValueError as e:
+            logger.error("向量 upsert 元数据/参数错误", collection=collection_name, error=str(e))
+            raise
+
+    def _upsert(
+        self,
+        collection_name: str,
+        documents: List[Document],
+        ids: List[str],
+    ) -> List[str]:
+        """同步 upsert：先做 embedding，再按稳定 ID 覆盖写入。"""
+        self._validate_upsert_input(documents, ids)
+        if not documents:
+            return []
+
+        for start in range(0, len(documents), ADD_BATCH_SIZE):
+            batch_documents = documents[start:start + ADD_BATCH_SIZE]
+            batch_ids = ids[start:start + ADD_BATCH_SIZE]
+            texts = [document.page_content for document in batch_documents]
+            metadatas = [dict(document.metadata) for document in batch_documents]
+            try:
+                embeddings = self.embeddings.embed_documents(texts)
+                self._upsert_sync_batch(collection_name, batch_ids, texts, metadatas, embeddings)
+            except chromadb.errors.ChromaError:
+                raise
+            except ValueError:
+                raise
+            except openai.APIError as e:
+                logger.error(
+                    "硅基流动 embedding 接口调用失败",
+                    collection=collection_name,
+                    error=str(e),
+                )
+                raise
+
+        logger.info("文档 upsert 完成", collection=collection_name, chunks=len(ids))
+        return ids
+
+    async def _aupsert(
+        self,
+        collection_name: str,
+        documents: List[Document],
+        ids: List[str],
+    ) -> List[str]:
+        """真异步 upsert：await 异步 embedding，Chroma 阻塞调用放线程池。"""
+        self._validate_upsert_input(documents, ids)
+        if not documents:
+            return []
+
+        for start in range(0, len(documents), ADD_BATCH_SIZE):
+            batch_documents = documents[start:start + ADD_BATCH_SIZE]
+            batch_ids = ids[start:start + ADD_BATCH_SIZE]
+            texts = [document.page_content for document in batch_documents]
+            metadatas = [dict(document.metadata) for document in batch_documents]
+            try:
+                embeddings = await self.embeddings.aembed_documents(texts)
+                await anyio.to_thread.run_sync(
+                    self._upsert_sync_batch,
+                    collection_name,
+                    batch_ids,
+                    texts,
+                    metadatas,
+                    embeddings,
+                )
+            except chromadb.errors.ChromaError:
+                raise
+            except ValueError:
+                raise
+            except openai.APIError as e:
+                logger.error(
+                    "硅基流动 embedding 接口调用失败(异步)",
+                    collection=collection_name,
+                    error=str(e),
+                )
+                raise
+
+        logger.info("文档 upsert 完成(异步)", collection=collection_name, chunks=len(ids))
+        return ids
+
+    def upsert_policy_documents(self, documents: List[Document], ids: List[str]) -> List[str]:
+        return self._upsert(POLICY_COLLECTION_NAME, documents, ids)
+
+    async def aupsert_policy_documents(
+        self, documents: List[Document], ids: List[str]
+    ) -> List[str]:
+        return await self._aupsert(POLICY_COLLECTION_NAME, documents, ids)
+
+    def upsert_manual_documents(self, documents: List[Document], ids: List[str]) -> List[str]:
+        return self._upsert(MANUAL_COLLECTION_NAME, documents, ids)
+
+    async def aupsert_manual_documents(
+        self, documents: List[Document], ids: List[str]
+    ) -> List[str]:
+        return await self._aupsert(MANUAL_COLLECTION_NAME, documents, ids)
+
+
+
+    # --------------------------------------------------------- 增量清理接口
+    def get_ids_by_document_id(self, collection_name: str, document_id: str) -> set[str]:
+        """查询某个源文件在集合中的旧块 ID。"""
+        collection = self._get_native_collection(collection_name)
+        try:
+            result = collection.get(where={"document_id": document_id}, include=[])
+        except chromadb.errors.ChromaError as e:
+            logger.error(
+                "查询文档旧块失败",
+                collection=collection_name,
+                document_id=document_id,
+                error=str(e),
+            )
+            raise
+        return set(result.get("ids") or [])
+
+    def delete_ids(self, collection_name: str, ids: List[str]) -> int:
+        """删除指定 ID，返回实际请求删除的数量。"""
+        if not ids:
+            return 0
+        collection = self._get_native_collection(collection_name)
+        try:
+            collection.delete(ids=ids)
+        except chromadb.errors.ChromaError as e:
+            logger.error("删除旧块失败", collection=collection_name, error=str(e))
+            raise
+        logger.info("删除旧文档块", collection=collection_name, chunks=len(ids))
+        return len(ids)
+
+    def delete_stale_ids(
+        self, collection_name: str, document_id: str, keep_ids: List[str]
+    ) -> List[str]:
+        """删除该文档中不属于本次构建的旧 ID（先 upsert、后清理）。"""
+        existing_ids = self.get_ids_by_document_id(collection_name, document_id)
+        stale_ids = sorted(existing_ids - set(keep_ids))
+        if stale_ids:
+            self.delete_ids(collection_name, stale_ids)
+        return stale_ids
+
 
 
 # 全局实例, 懒加载单例, 直接在import时创建会拖慢启动

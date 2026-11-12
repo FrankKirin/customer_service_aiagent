@@ -26,7 +26,23 @@ MANUAL_DIR = PROJECT_ROOT / "raw_data" / "manual_docs"
 ALLOWED_METADATA_KEYS = (
     set(POLICY_FRONT_MATTER_MAPPING.values())
     | set(MANUAL_FRONT_MATTER_MAPPING.values())
-    | {"source_type", "file_name", "file_path", "source", "chunk_index", "doc_id", "page", "pdf_title", "section"}
+    | {
+        "source_type",
+        "file_name",
+        "file_path",
+        "source",
+        "chunk_index",
+        "doc_id",
+        "chunk_id",
+        "block_type",
+        "page",
+        "pdf_title",
+        "section",
+        "table_index",
+        "image_path",
+        "image_hash",
+        "effective_date_num",
+    }
 )
 
 
