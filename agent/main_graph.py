@@ -1,7 +1,8 @@
 """主编排图：prepare -> router -> 子图/澄清 -> finalize。"""
 
+import time
 from functools import lru_cache
-from typing import Literal, Optional
+from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
 
@@ -10,6 +11,10 @@ from .nodes.finalize_node import finalize_node
 from .nodes.general_node import general_node
 from .nodes.prepare_node import prepare_turn_node
 from .nodes.router_node import router_node
+from .nodes.subgraph_wrappers import (
+    build_manual_wrapper_node,
+    build_policy_wrapper_node,
+)
 from .session import build_thread_config, get_checkpointer
 from .state import AgentResponse, OrchestratorState
 from .subgraphs.manual_agent import build_manual_agent
@@ -21,7 +26,7 @@ def route_after_router(state: OrchestratorState) -> Literal[
 ]:
     """路由节点之后的分支选择。"""
 
-    if state.clarification_needed:
+    if state.needs_clarification:
         return "clarify"
     if state.query_type == "policy":
         return "policy_agent"
@@ -30,15 +35,26 @@ def route_after_router(state: OrchestratorState) -> Literal[
     return "general_agent"
 
 
+def route_after_subgraph(state: OrchestratorState) -> Literal["clarify", "finalize"]:
+    """领域子图要求补充信息时，统一交给父图澄清节点出口。"""
+
+    if state.needs_clarification:
+        return "clarify"
+    return "finalize"
+
+
 def build_main_graph():
     """构建并编译主图。"""
+
+    policy_graph = build_policy_agent()
+    manual_graph = build_manual_agent()
 
     workflow = StateGraph(OrchestratorState)
     workflow.add_node("prepare_turn", prepare_turn_node)
     workflow.add_node("router", router_node)
     workflow.add_node("clarify", clarification_node)
-    workflow.add_node("policy_agent", build_policy_agent())
-    workflow.add_node("manual_agent", build_manual_agent())
+    workflow.add_node("policy_agent", build_policy_wrapper_node(policy_graph))
+    workflow.add_node("manual_agent", build_manual_wrapper_node(manual_graph))
     workflow.add_node("general_agent", general_node)
     workflow.add_node("finalize", finalize_node)
 
@@ -55,8 +71,15 @@ def build_main_graph():
         },
     )
     workflow.add_edge("clarify", "finalize")
-    workflow.add_edge("policy_agent", "finalize")
-    workflow.add_edge("manual_agent", "finalize")
+    for agent_node in ("policy_agent", "manual_agent"):
+        workflow.add_conditional_edges(
+            agent_node,
+            route_after_subgraph,
+            {
+                "clarify": "clarify",
+                "finalize": "finalize",
+            },
+        )
     workflow.add_edge("general_agent", "finalize")
     workflow.add_edge("finalize", END)
 
@@ -64,7 +87,6 @@ def build_main_graph():
 
 
 @lru_cache(maxsize=1)
-# 函数只生成一次，之后每次调用直接返回第一次生成好的，编译完成的StateGraph实例
 def get_main_graph():
     """编译一次，进程内复用。"""
 
@@ -72,30 +94,30 @@ def get_main_graph():
 
 
 async def process_query(
-    query: str,
+    user_query: str,
     session_id: str,
-    user_id: Optional[str] = None,
 ) -> AgentResponse:
     """对外统一入口，供 API 调用。"""
 
-    if not isinstance(query, str) or not query.strip():
-        raise ValueError("query 不能为空")
+    if not isinstance(user_query, str) or not user_query.strip():
+        raise ValueError("user_query 不能为空")
     if not isinstance(session_id, str) or not session_id.strip():
         raise ValueError("session_id 不能为空")
 
+    started_at = time.perf_counter()
     result = await get_main_graph().ainvoke(
-        {
-            "query": query.strip(),
-            "session_id": session_id.strip(),
-            "user_id": user_id,
-        },
+        {"user_query": user_query.strip()},
         build_thread_config(session_id.strip()),
     )
+    processing_time_ms = round((time.perf_counter() - started_at) * 1000, 2)
+
     state = OrchestratorState.model_validate(result)
     return AgentResponse(
-        response=state.response,
+        response=state.final_answer,
         query_type=state.query_type,
         source_citations=state.source_citations,
         should_escalate=state.should_escalate,
-        processing_time_ms=state.processing_time_ms,
+        needs_clarification=state.needs_clarification,
+        clarification_question=state.clarification_question,
+        processing_time_ms=processing_time_ms,
     )

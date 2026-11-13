@@ -4,7 +4,7 @@
 不编造故障原因、零件名称、维修参数或安全提示。
 """
 
-from typing import List, Literal, Sequence
+from typing import List, Literal, Optional, Sequence
 
 import chromadb
 import openai
@@ -16,13 +16,11 @@ from langgraph.graph import END, START, StateGraph
 from llm.base_llm import json_llm
 
 from ..prompts.manual_prompt import MANUAL_PROMPT_TEMPLATE
+from ..routing_rules import extract_slots
 from ..state import ManualAgentState
 from ..tools.manual_retriever import ManualRetrieverTool
-from ..utils.context import build_contextual_query
 from ..utils.documents import (
     build_citations,
-    build_source_info,
-    calculate_retrieval_confidence,
     documents_to_prompt_context,
     normalize_documents,
 )
@@ -30,12 +28,18 @@ from ..utils.json_parser import parse_json_model
 from ..utils.safety import extract_safety_warnings
 
 MANUAL_TOP_K = 8
+NO_MANUAL_DOCUMENTS_ANSWER = (
+    "抱歉，当前说明书知识库没有检索到足够依据，暂时无法确认具体操作步骤。"
+    "请补充产品型号、故障现象或页码，或联系人工客服进一步核实。"
+)
+
+IssueType = Literal["operation", "maintenance", "troubleshooting"]
 
 
 class ManualAnswer(BaseModel):
     """说明书问答模型的结构化输出。"""
 
-    issue_summary: str  
+    issue_summary: str
     steps: List[str] = Field(default_factory=list)
     used_sources: List[str] = Field(default_factory=list)
     insufficient_info: bool = False
@@ -45,57 +49,84 @@ class ManualAnswer(BaseModel):
     follow_up_question: str = ""
 
 
+def _subgraph_query(state: ManualAgentState) -> str:
+    """父图已经构建好上下文，子图只做一次兜底。"""
+
+    return state.context_query.strip() or state.user_query.strip()
+
+
+def _resolve_issue_type(state: ManualAgentState) -> Optional[IssueType]:
+    """从当前问题和上下文中提取明确出现的问题类型。
+
+    只使用用户真实表达的关键词，不根据产品常识推断。
+    """
+
+    slots = extract_slots(_subgraph_query(state), {})
+    issue_type = slots.get("issue_type")
+    if issue_type in ("operation", "maintenance", "troubleshooting"):
+        return issue_type
+    return None
+
+
 def _no_manual_documents_response() -> dict:
     return {
-        "query_type": "manual",
-        "response": "抱歉，当前说明书知识库没有检索到足够依据，暂时无法确认具体操作步骤。请补充产品型号、故障现象或页码，或联系人工客服进一步核实。",
-        "retrieved_docs": [],
-        "source_info": [],
+        "final_answer": NO_MANUAL_DOCUMENTS_ANSWER,
         "source_citations": [],
-        "retrieval_confidence": 0.0,
-        "step_by_step_guide": False,
+        "should_escalate": True,
+        "needs_clarification": False,
+        "clarification_question": "",
+        "steps": [],
         "safety_warnings": [],
-        "tools_needed": [],
         "requires_expert": False,
         "complexity_level": "low",
-        "clarification_needed": False,
-        "clarification_question": "",
-        "should_escalate": True,
     }
 
 
 async def manual_retrieve_node(state: ManualAgentState) -> dict:
-    """从真实说明书知识库检索。"""
+    """从真实说明书知识库检索，并把 issue_type 作为元数据过滤条件。"""
 
-    query = build_contextual_query(state)
+    query = _subgraph_query(state)
+    issue_type = _resolve_issue_type(state)
     try:
-        documents = await ManualRetrieverTool.ainvoke({"query": query, "top_k": MANUAL_TOP_K})
+        documents = await ManualRetrieverTool.ainvoke(
+            {
+                "query": query,
+                "issue_type": issue_type,
+                "top_k": MANUAL_TOP_K,
+            }
+        )
     except (chromadb.errors.ChromaError, openai.APIError, ValueError) as e:
         logger.error("说明书检索失败", query=query, error=str(e))
-        response = _no_manual_documents_response()
-        response["response"] = "抱歉，说明书检索服务暂时不可用，请稍后重试或联系人工客服。"
-        return response
+        return {
+            "final_answer": "抱歉，说明书检索服务暂时不可用，请稍后重试或联系人工客服。",
+            "source_citations": [],
+            "should_escalate": True,
+            "needs_clarification": False,
+            "clarification_question": "",
+            "issue_type": issue_type,
+            "steps": [],
+            "safety_warnings": [],
+        }
 
     documents = normalize_documents(documents)
     if not documents:
-        return _no_manual_documents_response()
+        return {
+            **_no_manual_documents_response(),
+            "issue_type": issue_type,
+        }
 
-    source_info = build_source_info(documents, "manual")
     safety_warnings = extract_safety_warnings(documents)
     return {
-        "query_type": "manual",
-        "retrieved_docs": documents,
-        "source_info": source_info,
+        "documents": documents,
         "source_citations": [],
-        "retrieval_confidence": calculate_retrieval_confidence(documents),
-        "step_by_step_guide": False,
+        "should_escalate": False,
+        "needs_clarification": False,
+        "clarification_question": "",
+        "issue_type": issue_type,
+        "steps": [],
         "safety_warnings": safety_warnings,
-        "tools_needed": [],
         "requires_expert": False,
         "complexity_level": "low",
-        "clarification_needed": False,
-        "clarification_question": "",
-        "should_escalate": False,
     }
 
 
@@ -144,13 +175,13 @@ def _format_manual_response(
 async def manual_generate_node(state: ManualAgentState) -> dict:
     """依据真实说明书原文生成步骤，并从原文抽取安全提示。"""
 
-    documents = state.retrieved_docs
+    documents = state.documents
     if not documents:
         return {}
 
     prompt = MANUAL_PROMPT_TEMPLATE.format(
         documents=documents_to_prompt_context(documents),
-        question=build_contextual_query(state),
+        question=_subgraph_query(state),
     )
 
     try:
@@ -160,15 +191,16 @@ async def manual_generate_node(state: ManualAgentState) -> dict:
             raise ValueError("说明书分析模型返回内容不是文本")
         answer = parse_json_model(content, ManualAnswer)
     except (openai.APIError, ValueError, ValidationError, TypeError) as e:
-        logger.error("说明书结构化回答失败", query=state.query, error=str(e))
+        logger.error("说明书结构化回答失败", query=state.user_query, error=str(e))
         return {
-            "response": "已检索到说明书原文，但回答生成失败。请稍后重试，或联系人工客服核实。",
-            "step_by_step_guide": False,
+            "final_answer": "已检索到说明书原文，但回答生成失败。请稍后重试，或联系人工客服核实。",
             "source_citations": [],
             "should_escalate": True,
+            "needs_clarification": False,
+            "clarification_question": "",
+            "steps": [],
         }
 
-    documents = state.retrieved_docs
     citations = build_citations(
         answer.used_sources,
         documents,
@@ -191,33 +223,39 @@ async def manual_generate_node(state: ManualAgentState) -> dict:
             "或联系人工客服进一步核实。"
         )
 
-    clarification_needed = bool(answer.follow_up_question.strip())
+    needs_clarification = bool(answer.follow_up_question.strip())
+    if needs_clarification:
+        citations = []
     should_escalate = (
-        answer.requires_expert
-        or answer.complexity_level == "high"
-        or (answer.insufficient_info and not clarification_needed)
-        or not citations
+        False
+        if needs_clarification
+        else (
+            answer.requires_expert
+            or answer.complexity_level == "high"
+            or answer.insufficient_info
+            or not citations
+        )
     )
 
     logger.info(
         "说明书问答完成",
-        query=state.query,
+        query=state.user_query,
+        issue_type=state.issue_type,
         step_count=len(steps),
         tools_needed=tools_needed,
         safety_warning_count=len(safety_warnings),
         citation_count=len(citations),
     )
     return {
-        "response": response_text,
+        "final_answer": response_text,
         "source_citations": citations,
-        "step_by_step_guide": bool(steps),
+        "should_escalate": should_escalate,
+        "needs_clarification": needs_clarification,
+        "clarification_question": answer.follow_up_question.strip(),
+        "steps": steps,
         "safety_warnings": safety_warnings,
-        "tools_needed": tools_needed,
         "requires_expert": answer.requires_expert,
         "complexity_level": answer.complexity_level,
-        "clarification_needed": clarification_needed,
-        "clarification_question": answer.follow_up_question.strip(),
-        "should_escalate": should_escalate,
     }
 
 

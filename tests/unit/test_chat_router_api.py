@@ -8,12 +8,14 @@ from main import app
 
 
 def test_chat_endpoint_returns_agent_response(monkeypatch):
-    async def fake_process_query(query: str, session_id: str, user_id: str | None = None):
+    async def fake_process_query(user_query: str, session_id: str):
         return AgentResponse(
-            response=f"echo: {query}",
+            response=f"echo: {user_query}",
             query_type="general",
             source_citations=[],
             should_escalate=False,
+            needs_clarification=False,
+            clarification_question="",
             processing_time_ms=1.0,
         )
 
@@ -30,6 +32,8 @@ def test_chat_endpoint_returns_agent_response(monkeypatch):
     assert payload["response"] == "echo: 你好"
     assert payload["query_type"] == "general"
     assert payload["source_citations"] == []
+    assert payload["needs_clarification"] is False
+    assert payload["clarification_question"] == ""
 
 
 def test_chat_endpoint_rejects_empty_query():

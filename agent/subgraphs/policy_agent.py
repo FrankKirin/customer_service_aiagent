@@ -17,17 +17,18 @@ from llm.base_llm import json_llm
 from ..prompts.policy_prompt import POLICY_PROMPT_TEMPLATE
 from ..state import PolicyAgentState
 from ..tools.policy_retriever import PolicyRetrieverTool
-from ..utils.context import build_contextual_query
 from ..utils.documents import (
     build_citations,
-    build_source_info,
-    calculate_retrieval_confidence,
     documents_to_prompt_context,
     normalize_documents,
 )
 from ..utils.json_parser import parse_json_model
 
 POLICY_TOP_K = 5
+NO_POLICY_DOCUMENTS_ANSWER = (
+    "抱歉，当前政策知识库没有检索到足够依据，暂时无法确认这项售后政策。"
+    "请补充购买渠道、收货时间或故障情况，或联系人工客服进一步核实。"
+)
 
 
 class PolicyAnswer(BaseModel):
@@ -42,67 +43,67 @@ class PolicyAnswer(BaseModel):
     follow_up_question: str = ""
 
 
+def _subgraph_query(state: PolicyAgentState) -> str:
+    """父图已经构建好上下文，子图只做一次兜底。"""
+
+    return state.context_query.strip() or state.user_query.strip()
+
+
 def _no_policy_documents_response() -> dict:
     return {
-        "query_type": "policy",
-        "response": "抱歉，当前政策知识库没有检索到足够依据，暂时无法确认这项售后政策。请补充购买渠道、收货时间或故障情况，或联系人工客服进一步核实。",
-        "retrieved_docs": [],
-        "source_info": [],
+        "final_answer": NO_POLICY_DOCUMENTS_ANSWER,
         "source_citations": [],
-        "retrieval_confidence": 0.0,
-        "policy_applicability": "unknown",
-        "policy_conditions": {},
-        "policy_summary": "",
-        "policy_violations": [],
-        "clarification_needed": False,
-        "clarification_question": "",
         "should_escalate": True,
+        "needs_clarification": False,
+        "clarification_question": "",
+        "policy_applicability": "unknown",
+        "policy_conditions": [],
+        "policy_violations": [],
     }
 
 
 async def policy_retrieve_node(state: PolicyAgentState) -> dict:
-    """从真实政策知识库检索，不在任务3使用不可靠的元数据过滤。"""
+    """从真实政策知识库检索。"""
 
-    query = build_contextual_query(state)
+    query = _subgraph_query(state)
     try:
         documents = await PolicyRetrieverTool.ainvoke({"query": query, "top_k": POLICY_TOP_K})
     except (chromadb.errors.ChromaError, openai.APIError, ValueError) as e:
         logger.error("政策检索失败", query=query, error=str(e))
-        response = _no_policy_documents_response()
-        response["response"] = "抱歉，政策检索服务暂时不可用，请稍后重试或联系人工客服。"
-        return response
+        return {
+            "final_answer": "抱歉，政策检索服务暂时不可用，请稍后重试或联系人工客服。",
+            "source_citations": [],
+            "should_escalate": True,
+            "needs_clarification": False,
+            "clarification_question": "",
+        }
 
     documents = normalize_documents(documents)
     if not documents:
         return _no_policy_documents_response()
 
-    source_info = build_source_info(documents, "policy")
     return {
-        "query_type": "policy",
-        "retrieved_docs": documents,
-        "source_info": source_info,
+        "documents": documents,
         "source_citations": [],
-        "retrieval_confidence": calculate_retrieval_confidence(documents),
-        "policy_applicability": "unknown",
-        "policy_conditions": {},
-        "policy_summary": "",
-        "policy_violations": [],
-        "clarification_needed": False,
-        "clarification_question": "",
         "should_escalate": False,
+        "needs_clarification": False,
+        "clarification_question": "",
+        "policy_applicability": "unknown",
+        "policy_conditions": [],
+        "policy_violations": [],
     }
 
 
 async def policy_analyze_node(state: PolicyAgentState) -> dict:
     """依据真实政策原文生成结构化回答和引用。"""
 
-    documents = state.retrieved_docs
+    documents = state.documents
     if not documents:
         return {}
 
     prompt = POLICY_PROMPT_TEMPLATE.format(
         documents=documents_to_prompt_context(documents),
-        question=build_contextual_query(state),
+        question=_subgraph_query(state),
     )
 
     try:
@@ -112,12 +113,14 @@ async def policy_analyze_node(state: PolicyAgentState) -> dict:
             raise ValueError("政策分析模型返回内容不是文本")
         answer = parse_json_model(content, PolicyAnswer)
     except (openai.APIError, ValueError, ValidationError, TypeError) as e:
-        logger.error("政策结构化回答失败", query=state.query, error=str(e))
+        logger.error("政策结构化回答失败", query=state.user_query, error=str(e))
         return {
-            "response": "已检索到政策原文，但回答生成失败。请稍后重试，或联系人工客服核实。",
-            "policy_applicability": "unknown",
+            "final_answer": "已检索到政策原文，但回答生成失败。请稍后重试，或联系人工客服核实。",
             "source_citations": [],
             "should_escalate": True,
+            "needs_clarification": False,
+            "clarification_question": "",
+            "policy_applicability": "unknown",
         }
 
     citations = build_citations(
@@ -133,29 +136,31 @@ async def policy_analyze_node(state: PolicyAgentState) -> dict:
             "或联系人工客服进一步核实。"
         )
 
-    clarification_needed = bool(answer.follow_up_question.strip())
-    should_escalate = (answer.insufficient_info and not clarification_needed) or not citations
+    needs_clarification = bool(answer.follow_up_question.strip())
+    if needs_clarification:
+        citations = []
+    should_escalate = (
+        False
+        if needs_clarification
+        else (answer.insufficient_info or not citations)
+    )
 
     logger.info(
         "政策问答完成",
-        query=state.query,
+        query=state.user_query,
         applicability=answer.applicability,
         used_sources=answer.used_sources,
         citation_count=len(citations),
     )
     return {
-        "response": response_text,
+        "final_answer": response_text,
         "source_citations": citations,
-        "policy_applicability": answer.applicability,
-        "policy_conditions": {
-            "conditions": answer.conditions,
-            "violations": answer.violations,
-        },
-        "policy_summary": response_text,
-        "policy_violations": answer.violations,
-        "clarification_needed": clarification_needed,
-        "clarification_question": answer.follow_up_question.strip(),
         "should_escalate": should_escalate,
+        "needs_clarification": needs_clarification,
+        "clarification_question": answer.follow_up_question.strip(),
+        "policy_applicability": answer.applicability,
+        "policy_conditions": answer.conditions,
+        "policy_violations": answer.violations,
     }
 
 
@@ -170,4 +175,3 @@ def build_policy_agent():
     graph.add_edge("policy_retrieve", "policy_analyze")
     graph.add_edge("policy_analyze", END)
     return graph.compile()
-

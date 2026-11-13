@@ -1,35 +1,71 @@
-"""主图状态结构测试。"""
+"""主图与子图状态结构测试。"""
 
 from agent.state import (
     Citation,
     ManualAgentState,
     OrchestratorState,
     PolicyAgentState,
-    SharedState,
     SourceInfo,
 )
 
 
-def test_orchestrator_declares_all_subgraph_fields():
-    """子图返回的字段必须在父图中存在，否则会被 LangGraph 丢弃。"""
+def test_orchestrator_state_is_thin_and_does_not_inherit_subgraph_fields():
+    """父图只保留跨轮/对外/决策字段，不复制子图领域字段。"""
 
-    shared_fields = set(SharedState.model_fields)
-    policy_fields = set(PolicyAgentState.model_fields) - shared_fields
-    manual_fields = set(ManualAgentState.model_fields) - shared_fields
-    expected = shared_fields | policy_fields | manual_fields
+    assert set(OrchestratorState.model_fields) == {
+        "user_query",
+        "final_answer",
+        "query_type",
+        "needs_clarification",
+        "clarification_question",
+        "clarified_info",
+        "missing_info",
+        "messages",
+        "source_citations",
+        "should_escalate",
+    }
 
-    assert set(OrchestratorState.model_fields) == expected
-    assert {"product_line", "policy_applicability", "policy_violations"} <= policy_fields
-    assert {"product_model", "safety_warnings", "requires_expert"} <= manual_fields
+    assert "documents" not in OrchestratorState.model_fields
+    assert "safety_warnings" not in OrchestratorState.model_fields
+    assert "policy_conditions" not in OrchestratorState.model_fields
+
+
+def test_subgraph_states_declare_input_and_output_contract_fields():
+    expected_output_fields = {
+        "final_answer",
+        "source_citations",
+        "should_escalate",
+        "needs_clarification",
+        "clarification_question",
+    }
+
+    for state_type in (PolicyAgentState, ManualAgentState):
+        fields = set(state_type.model_fields)
+        assert {"user_query", "context_query"} <= fields
+        assert expected_output_fields <= fields
+
+    assert "steps" in ManualAgentState.model_fields
 
 
 def test_policy_and_manual_fields_have_expected_types():
-    state = OrchestratorState(query="测试问题", session_id="session-1")
+    policy_state = PolicyAgentState(
+        user_query="收到第5天可以退货吗？",
+        context_query="收到第5天可以退货吗？",
+    )
+    manual_state = ManualAgentState(
+        user_query="冰箱不制冷怎么处理？",
+        context_query="冰箱不制冷怎么处理？",
+    )
+    parent_state = OrchestratorState(user_query="测试问题")
 
-    assert state.policy_conditions == {}
-    assert state.policy_violations == []
-    assert state.safety_warnings == []
-    assert state.complexity_level == "low"
+    assert policy_state.policy_conditions == []
+    assert policy_state.policy_violations == []
+    assert policy_state.policy_applicability == "unknown"
+    assert manual_state.steps == []
+    assert manual_state.safety_warnings == []
+    assert manual_state.complexity_level == "low"
+    assert parent_state.final_answer == ""
+    assert parent_state.clarified_info == {}
 
 
 def test_citation_keeps_real_source_structure():

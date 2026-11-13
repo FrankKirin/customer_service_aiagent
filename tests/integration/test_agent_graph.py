@@ -39,7 +39,7 @@ def test_policy_question_returns_response_and_real_citation():
     row = _load_golden_question("keg-AS-003")
     result = asyncio.run(
         process_query(
-            query=row["question"],
+            user_query=row["question"],
             session_id=f"agent-eval-{uuid.uuid4()}",
         )
     )

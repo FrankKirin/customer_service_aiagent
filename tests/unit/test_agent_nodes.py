@@ -49,13 +49,13 @@ def _manual_document() -> Document:
     )
 
 
-def test_prepare_turn_resets_domain_outputs_but_keeps_pending_clarification():
+def test_prepare_turn_resets_outputs_but_keeps_pending_clarification():
     state = OrchestratorState(
-        query="第5天可以退吗？",
-        session_id="s1",
-        clarification_needed=True,
+        user_query="第5天可以退吗？",
+        needs_clarification=True,
         clarification_question="上一轮问题",
-        response="上一轮回答",
+        final_answer="上一轮回答",
+        clarified_info={"purchase_channel": "线下门店"},
         source_citations=[
             Citation(
                 text="上一轮引用",
@@ -67,11 +67,12 @@ def test_prepare_turn_resets_domain_outputs_but_keeps_pending_clarification():
 
     update = prepare_turn_node(state)
 
-    assert update["clarification_needed"] is True
+    assert update["needs_clarification"] is True
     assert update["clarification_question"] == ""
-    assert update["response"] == ""
+    assert update["final_answer"] == ""
     assert update["source_citations"] == []
     assert update["messages"][0].content == "第5天可以退吗？"
+    assert "clarified_info" not in update
 
 
 def test_router_uses_llm_output_for_non_rule_question(monkeypatch):
@@ -83,12 +84,12 @@ def test_router_uses_llm_output_for_non_rule_question(monkeypatch):
         )
 
     monkeypatch.setattr(router_module, "_call_router_llm", fake_call)
-    state = OrchestratorState(query="你好", session_id="s1")
+    state = OrchestratorState(user_query="你好")
 
     update = asyncio.run(router_module.router_node(state))
 
     assert update["query_type"] == "general"
-    assert update["clarification_needed"] is False
+    assert update["needs_clarification"] is False
 
 
 def test_router_turns_ambiguous_question_into_clarification(monkeypatch):
@@ -102,25 +103,65 @@ def test_router_turns_ambiguous_question_into_clarification(monkeypatch):
         )
 
     monkeypatch.setattr(router_module, "_call_router_llm", fake_call)
-    state = OrchestratorState(query="我这个能换吗？", session_id="s1")
+    state = OrchestratorState(user_query="我这个能换吗？")
 
     update = asyncio.run(router_module.router_node(state))
 
-    assert update["clarification_needed"] is True
+    assert update["needs_clarification"] is True
+    assert update["missing_info"] == ["query_scope"]
+
+
+def test_router_keeps_llm_slots_when_clarification_is_required(monkeypatch):
+    async def fake_call(state):
+        return router_module.RouterLLMOutput(
+            query_type="manual",
+            confidence=0.9,
+            needs_clarification=True,
+            missing_info=["product_model"],
+            clarification_question="请问您的冰箱型号是什么？",
+            clarified_info={"purchase_channel": "线下门店"},
+            product_model="N.30-2-31",
+        )
+
+    monkeypatch.setattr(router_module, "_call_router_llm", fake_call)
+    state = OrchestratorState(user_query="这个型号怎么弄？")
+
+    update = asyncio.run(router_module.router_node(state))
+
+    assert update["needs_clarification"] is True
+    assert update["clarified_info"]["purchase_channel"] == "线下门店"
+    assert update["clarified_info"]["product_model"] == "N.30-2-31"
+
+
+def test_router_forces_clarification_for_ambiguous_first_turn_even_when_confident(monkeypatch):
+    async def fake_call(state):
+        return router_module.RouterLLMOutput(
+            query_type="general",
+            confidence=0.95,
+            needs_clarification=False,
+            clarified_info={},
+        )
+
+    monkeypatch.setattr(router_module, "_call_router_llm", fake_call)
+    state = OrchestratorState(user_query="这个怎么处理？")
+
+    update = asyncio.run(router_module.router_node(state))
+
+    assert update["needs_clarification"] is True
     assert update["missing_info"] == ["query_scope"]
 
 
 def test_clarification_node_builds_template_question_from_missing_field():
     state = OrchestratorState(
-        query="我这个能换吗？",
-        session_id="s1",
+        user_query="我这个能换吗？",
         missing_info=["query_scope"],
     )
 
     update = asyncio.run(clarification_node(state))
 
-    assert update["clarification_needed"] is True
-    assert "售后政策" in update["response"]
+    assert update["needs_clarification"] is True
+    assert "售后政策" in update["final_answer"]
+    assert update["clarification_question"] == update["final_answer"]
 
 
 def test_policy_analyze_builds_citation_from_retrieved_document(monkeypatch):
@@ -138,22 +179,15 @@ def test_policy_analyze_builds_citation_from_retrieved_document(monkeypatch):
     monkeypatch.setattr(policy_module, "json_llm", FakeJSONLLM(payload))
     document = _policy_document()
     state = PolicyAgentState(
-        query="收到第5天可以退货吗？",
-        session_id="s1",
-        retrieved_docs=[document],
-        source_info=[
-            SourceInfo(
-                source_id="keg_after_sales_policy_2026",
-                source_type="policy",
-                section="服务政策/如何退、换货？/退换货规定",
-                relevance_score=0.9,
-            )
-        ],
+        user_query="收到第5天可以退货吗？",
+        context_query="收到第5天可以退货吗？",
+        documents=[document],
     )
 
     update = asyncio.run(policy_module.policy_analyze_node(state))
 
     assert update["policy_applicability"] == "applicable"
+    assert update["policy_conditions"] == ["7日内", "性能故障"]
     assert update["source_citations"][0].source.section.endswith("退换货规定")
     assert update["should_escalate"] is False
 
@@ -176,25 +210,30 @@ def test_manual_generate_appends_real_safety_warning_and_steps(monkeypatch):
     warning = "注意：接通电源前，请仔细阅读说明书，正确使用冰箱，并妥善保管。"
 
     state = manual_module.ManualAgentState(
-        query="说明书里接通电源前要注意什么？",
-        session_id="s1",
-        retrieved_docs=[document],
-        source_info=[
-            SourceInfo(
-                source_id="家用冰箱通用说明书_N.30-2-31",
-                source_type="manual",
-                page=2,
-                relevance_score=0.8,
-            )
-        ],
+        user_query="说明书里接通电源前要注意什么？",
+        context_query="说明书里接通电源前要注意什么？",
+        documents=[document],
         safety_warnings=[warning],
     )
 
     update = asyncio.run(manual_module.manual_generate_node(state))
 
-    assert "操作步骤：" in update["response"]
-    assert "安全提示：" in update["response"]
+    assert "操作步骤：" in update["final_answer"]
+    assert "安全提示：" in update["final_answer"]
+    assert update["steps"] == ["接通电源前阅读说明书。"]
     assert update["source_citations"][0].source.page == 2
+
+
+def test_finalize_keeps_clarification_invariant_when_question_is_empty():
+    state = OrchestratorState(
+        user_query="这个怎么处理？",
+        needs_clarification=True,
+    )
+
+    update = asyncio.run(finalize_node(state))
+
+    assert update["final_answer"]
+    assert update["should_escalate"] is False
 
 
 def test_finalize_appends_source_lines_and_writes_ai_message():
@@ -205,15 +244,13 @@ def test_finalize_appends_source_lines_and_writes_ai_message():
         relevance_score=0.9,
     )
     state = OrchestratorState(
-        query="可以退吗？",
-        session_id="s1",
-        response="符合7日条件可以选择退货。",
+        user_query="可以退吗？",
+        final_answer="符合7日条件可以选择退货。",
         source_citations=[Citation(text="7日内……", source=source)],
     )
 
     update = asyncio.run(finalize_node(state))
 
-    assert "参考来源：" in update["response"]
+    assert "参考来源：" in update["final_answer"]
     assert isinstance(update["messages"][0], AIMessage)
-    assert update["processing_time_ms"] >= 0
 

@@ -126,18 +126,6 @@ def source_info_from_document(
     except (ValidationError, TypeError, ValueError):
         return None
 
-def build_source_info(
-    documents: List[Document], source_type: SourceType
-) -> List[SourceInfo]:
-    """为检索结果构造来源列表，跳过元数据不完整的文档。"""
-
-    sources: List[SourceInfo] = []
-    for document in documents:
-        source = source_info_from_document(document, source_type)
-        if source is not None:
-            sources.append(source)
-    return sources
-
 
 def _parse_used_source_indexes(
     used_sources: List[str], document_count: int
@@ -199,19 +187,6 @@ def build_citations(
         if len(citations) >= _MAX_CITATIONS:
             break
     return citations
-
-
-def calculate_retrieval_confidence(documents: List[Document]) -> float:
-    """只用真实的 relevance_score 计算平均检索置信度。"""
-
-    scores: List[float] = []
-    for document in documents:
-        score = _coerce_score(document.metadata.get("relevance_score"))
-        if score > 0:
-            scores.append(score)
-    if not scores:
-        return 0.0
-    return round(sum(scores) / len(scores), 4)
 
 
 def documents_to_prompt_context(

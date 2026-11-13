@@ -8,7 +8,7 @@ from typing import Any, Dict
 
 from langgraph.checkpoint.memory import InMemorySaver
 
-
+# 如果从MemorySaver更换Redis，只要从这里替换即可
 @lru_cache(maxsize=1)
 def get_checkpointer() -> InMemorySaver:
     """编译图时复用的内存 checkpoint。"""

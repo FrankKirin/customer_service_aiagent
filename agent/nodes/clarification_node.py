@@ -16,7 +16,11 @@ async def clarification_node(state: OrchestratorState) -> dict:
         question = await ClarificationTool.ainvoke(
             {
                 "missing_fields": state.missing_info,
-                "context": build_contextual_query(state),
+                "context": build_contextual_query(
+                    user_query=state.user_query,
+                    messages=state.messages,
+                    clarified_info=state.clarified_info,
+                ),
             }
         )
     else:
@@ -24,13 +28,13 @@ async def clarification_node(state: OrchestratorState) -> dict:
 
     logger.info(
         "生成澄清问题",
-        query=state.query,
+        query=state.user_query,
         missing_info=state.missing_info,
     )
     return {
         "query_type": state.query_type,
-        "response": question,
-        "clarification_needed": True,
+        "final_answer": question,
+        "needs_clarification": True,
         "clarification_question": question,
         "should_escalate": False,
     }

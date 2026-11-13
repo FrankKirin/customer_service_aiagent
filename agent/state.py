@@ -1,14 +1,13 @@
-"""Agent 共享状态定义。
+"""主图与子图状态定义。
 
 约定：
-- 节点接收的是 Pydantic State 对象，字段通过属性访问；
-- 主图使用 OrchestratorState，政策子图使用 PolicyAgentState，
-  说明书子图使用 ManualAgentState；
-- 所有子图字段都必须在 OrchestratorState 中存在，否则父图会丢弃。
+- 父图只保存需要跨轮持久化、对外输出或参与决策的字段；
+- 主图与子图不共享 State，子图只通过输入/输出契约与父图交换数据；
+- 子图 State 必须显式声明输出契约字段，否则 LangGraph 会丢弃节点返回值；
+- `documents` 保存真实检索到的 Document（文本 + metadata），不是 embedding 向量。
 """
 
 import operator
-from datetime import datetime
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from langchain_core.documents import Document
@@ -56,87 +55,105 @@ class Citation(BaseModel):
         return f"「{self.text[:50]}...」来源: {self.source}"
 
 
-class SharedState(BaseModel):
-    """主图和两个子图共享的基础状态。"""
+class PolicyAgentState(BaseModel):
+    """政策子图状态：输入契约 + 子图内部字段 + 输出契约。"""
 
-    # 用户输入
-    query: str = Field(description="用户原始查询")
-    user_id: Optional[str] = Field(default=None, description="用户ID")
-    session_id: str = Field(description="会话ID")
+    # 输入契约（由父图 wrapper 提供）
+    user_query: str = Field(description="用户当前问题")
+    context_query: str = Field(description="父图构建的检索/生成上下文")
 
-    # 路由信息
-    query_type: Literal["policy", "manual", "general"] = Field(
-        default="general", description="查询类型"
+    # 子图内部字段
+    documents: List[Document] = Field(
+        default_factory=list, description="真实检索到的政策文档片段"
     )
-    missing_info: List[str] = Field(default_factory=list, description="缺失的关键信息列表")
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="路由置信度")
-
-    # 澄清管理
-    clarification_needed: bool = Field(default=False, description="是否需要澄清")
-    clarification_question: str = Field(default="", description="澄清问题")
-    clarified_info: Dict[str, Any] = Field(default_factory=dict, description="已澄清的信息")
-
-    # 检索结果
-    retrieved_docs: List[Document] = Field(default_factory=list, description="检索到的文档片段")
-    source_info: List[SourceInfo] = Field(default_factory=list, description="来源信息")
-    retrieval_confidence: float = Field(
-        default=0.0, ge=0.0, le=1.0, description="检索置信度"
+    policy_applicability: Literal[
+        "applicable", "not_applicable", "conditional", "unknown"
+    ] = Field(default="unknown", description="政策适用性")
+    policy_conditions: List[str] = Field(
+        default_factory=list, description="政策适用需要满足的条件"
+    )
+    policy_violations: List[str] = Field(
+        default_factory=list, description="用户情况与政策不符的地方"
     )
 
-    # 响应生成
-    response: str = Field(default="", description="最终响应")
-    source_citations: List[Citation] = Field(default_factory=list, description="引用的来源")
+    # 输出契约（必须由子图返回给父图 wrapper）
+    final_answer: str = Field(default="", description="政策子图生成的回答")
+    source_citations: List[Citation] = Field(
+        default_factory=list, description="回答实际引用的来源"
+    )
     should_escalate: bool = Field(default=False, description="是否需要转人工")
-
-    # 元数据
-    timestamp: datetime = Field(default_factory=datetime.now, description="时间戳")
-    processing_time_ms: float = Field(default=0.0, ge=0.0, description="处理时间(ms)")
-
-    # LangGraph 需要的历史消息
-    messages: Annotated[List[AnyMessage], operator.add] = Field(
-        default_factory=list, description="消息历史"
-    )
+    needs_clarification: bool = Field(default=False, description="是否需要用户补充信息")
+    clarification_question: str = Field(default="", description="向用户提出的澄清问题")
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
-class PolicyAgentState(SharedState):
-    """政策问答子图状态。"""
+class ManualAgentState(BaseModel):
+    """说明书子图状态：输入契约 + 子图内部字段 + 输出契约。"""
 
-    product_line: Optional[str] = Field(default=None, description="产品线")
-    region: Optional[str] = Field(default=None, description="地区")
-    policy_applicability: Literal[
-        "applicable", "not_applicable", "conditional", "unknown"
-    ] = Field(default="unknown", description="政策适用性")
-    policy_conditions: Dict[str, Any] = Field(default_factory=dict, description="适用条件")
-    policy_summary: str = Field(default="", description="政策摘要")
-    policy_violations: List[str] = Field(default_factory=list, description="不符合政策的地方")
+    # 输入契约（由父图 wrapper 提供）
+    user_query: str = Field(description="用户当前问题")
+    context_query: str = Field(description="父图构建的检索/生成上下文")
 
-
-class ManualAgentState(SharedState):
-    """说明书问答子图状态。"""
-
-    product_model: Optional[str] = Field(default=None, description="产品型号")
-    product_version: Optional[str] = Field(default=None, description="产品版本")
+    # 子图内部字段
+    documents: List[Document] = Field(
+        default_factory=list, description="真实检索到的说明书文档片段"
+    )
     issue_type: Optional[
         Literal["operation", "maintenance", "troubleshooting"]
-    ] = Field(default=None, description="问题类型")
-    step_by_step_guide: bool = Field(default=False, description="是否包含步骤指导")
-    safety_warnings: List[str] = Field(default_factory=list, description="安全警告")
-    tools_needed: List[str] = Field(default_factory=list, description="所需工具")
-
-    # 技术指标
+    ] = Field(default=None, description="从用户问题中确定的说明书问题类型")
+    steps: List[str] = Field(default_factory=list, description="说明书操作/排查步骤")
+    safety_warnings: List[str] = Field(
+        default_factory=list, description="从说明书原文抽取的安全提示"
+    )
     requires_expert: bool = Field(default=False, description="是否需要专家协助")
     complexity_level: Literal["low", "medium", "high"] = Field(
         default="low", description="操作复杂度"
     )
 
+    # 输出契约（必须由子图返回给父图 wrapper）
+    final_answer: str = Field(default="", description="说明书子图生成的回答")
+    source_citations: List[Citation] = Field(
+        default_factory=list, description="回答实际引用的来源"
+    )
+    should_escalate: bool = Field(default=False, description="是否需要转人工")
+    needs_clarification: bool = Field(default=False, description="是否需要用户补充信息")
+    clarification_question: str = Field(default="", description="向用户提出的澄清问题")
 
-class OrchestratorState(PolicyAgentState, ManualAgentState):
-    """主图编排状态。
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    同时包含政策和说明书子图的字段，保证子图返回的领域字段不会被父图丢弃。
+
+class OrchestratorState(BaseModel):
+    """主图编排状态（薄状态）。
+
+    子图领域字段不会进入父图 checkpoint，父图只接收输出契约字段。
     """
+
+    # 本轮输入与跨轮历史
+    user_query: str = Field(description="用户当前原始问题")
+    messages: Annotated[List[AnyMessage], operator.add] = Field(
+        default_factory=list, description="消息历史"
+    )
+
+    # 路由与澄清
+    query_type: Literal["policy", "manual", "general"] = Field(
+        default="general", description="路由预测的目标领域"
+    )
+    needs_clarification: bool = Field(default=False, description="本轮是否返回澄清问题")
+    clarification_question: str = Field(default="", description="向用户提出的澄清问题")
+    clarified_info: Dict[str, Any] = Field(
+        default_factory=dict, description="多轮对话中已经确认的槽位"
+    )
+    missing_info: List[str] = Field(default_factory=list, description="缺失的信息字段")
+
+    # 对外结果
+    final_answer: str = Field(default="", description="最终回答")
+    source_citations: List[Citation] = Field(
+        default_factory=list, description="最终回答引用的来源"
+    )
+    should_escalate: bool = Field(default=False, description="是否需要转人工")
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class AgentResponse(BaseModel):
@@ -144,6 +161,8 @@ class AgentResponse(BaseModel):
 
     response: str
     query_type: Literal["policy", "manual", "general"]
-    source_citations: List[Citation] = Field(default_factory=list)
-    should_escalate: bool = False
-    processing_time_ms: float = 0.0
+    source_citations: List[Citation] = Field(default_factory=list)  # 引用来源
+    should_escalate: bool = False   # 是否转人工
+    needs_clarification: bool = False  # 是否需要澄清
+    clarification_question: str = ""
+    processing_time_ms: float = 0.0   # 处理时间，偏运维观测

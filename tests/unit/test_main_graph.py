@@ -54,7 +54,7 @@ def test_policy_turn_runs_through_main_graph_and_returns_citation(monkeypatch):
     try:
         result = asyncio.run(
             main_graph.process_query(
-                query="我在门店买的冰箱，收到货第5天发现制冷出了问题，可以要求退货吗？",
+                user_query="我在门店买的冰箱，收到货第5天发现制冷出了问题，可以要求退货吗？",
                 session_id="unit-policy-session",
             )
         )
@@ -117,11 +117,11 @@ def test_clarification_then_policy_answer_reuses_same_thread(monkeypatch):
 
     try:
         first = asyncio.run(
-            main_graph.process_query(query="我这个能换吗？", session_id=session_id)
+            main_graph.process_query(user_query="我这个能换吗？", session_id=session_id)
         )
         second = asyncio.run(
             main_graph.process_query(
-                query="我在门店买的冰箱，收到货第5天发现制冷出了问题，可以要求退货吗？",
+                user_query="我在门店买的冰箱，收到货第5天发现制冷出了问题，可以要求退货吗？",
                 session_id=session_id,
             )
         )
@@ -134,7 +134,11 @@ def test_clarification_then_policy_answer_reuses_same_thread(monkeypatch):
 
 
 class FakeManualRetriever:
+    def __init__(self) -> None:
+        self.payloads: list[dict[str, Any]] = []
+
     async def ainvoke(self, payload: dict[str, Any]) -> list[Document]:
+        self.payloads.append(payload)
         return [
             Document(
                 page_content="注意：\n接通电源前，请仔细阅读说明书，正确使用冰箱，并妥善保管。",
@@ -163,7 +167,8 @@ def test_manual_turn_runs_through_main_graph_and_adds_safety_warning(monkeypatch
         "tools_needed": [],
         "follow_up_question": "",
     }
-    monkeypatch.setattr(manual_agent, "ManualRetrieverTool", FakeManualRetriever())
+    manual_retriever = FakeManualRetriever()
+    monkeypatch.setattr(manual_agent, "ManualRetrieverTool", manual_retriever)
     monkeypatch.setattr(manual_agent, "json_llm", FakeJSONLLM(payload))
     monkeypatch.setattr(main_graph, "get_checkpointer", lambda: InMemorySaver())
     main_graph.get_main_graph.cache_clear()
@@ -171,7 +176,7 @@ def test_manual_turn_runs_through_main_graph_and_adds_safety_warning(monkeypatch
     try:
         result = asyncio.run(
             main_graph.process_query(
-                query="冰箱显示屏出现 E1 故障码，是什么意思？该怎么处理？",
+                user_query="冰箱显示屏出现 E1 故障码，是什么意思？该怎么处理？",
                 session_id="unit-manual-session",
             )
         )
@@ -182,4 +187,5 @@ def test_manual_turn_runs_through_main_graph_and_adds_safety_warning(monkeypatch
     assert "操作步骤：" in result.response
     assert "安全提示：" in result.response
     assert result.source_citations[0].source.page == 2
+    assert manual_retriever.payloads[0]["issue_type"] == "troubleshooting"
 

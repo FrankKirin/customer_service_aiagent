@@ -100,6 +100,23 @@ def create_manual_retriever_tool() -> StructuredTool:
                 filter_conditions=filter_conditions,
                 top_k=top_k,
             )
+            if not documents and kwargs.get("issue_type"):
+                # 当前说明书元数据不一定都有 issue_type，过滤为空时回退到
+                # 只保留 product_model 的检索，避免把真实可召回文档全部过滤掉。
+                fallback_conditions = _build_filter_conditions(
+                    product_model=kwargs.get("product_model"),
+                    issue_type=None,
+                )
+                logger.warning(
+                    "按issue_type过滤无结果, 回退到不带该条件的检索",
+                    query=query,
+                    issue_type=kwargs.get("issue_type"),
+                )
+                documents = get_vector_store_manager().search_manual_documents(
+                    query=query,
+                    filter_conditions=fallback_conditions,
+                    top_k=top_k,
+                )
         except chromadb.errors.ChromaError as e:
             logger.error("说明书向量库检索失败", query=query, error=str(e))
             raise
@@ -133,6 +150,22 @@ def create_manual_retriever_tool() -> StructuredTool:
                 filter_conditions=filter_conditions,
                 top_k=top_k,
             )
+            if not documents and kwargs.get("issue_type"):
+                # 与同步入口保持一致：元数据缺 issue_type 时不能把结果全部过滤掉。
+                fallback_conditions = _build_filter_conditions(
+                    product_model=kwargs.get("product_model"),
+                    issue_type=None,
+                )
+                logger.warning(
+                    "按issue_type过滤无结果(异步), 回退到不带该条件的检索",
+                    query=query,
+                    issue_type=kwargs.get("issue_type"),
+                )
+                documents = await get_vector_store_manager().asearch_manual_documents(
+                    query=query,
+                    filter_conditions=fallback_conditions,
+                    top_k=top_k,
+                )
         except chromadb.errors.ChromaError as e:
             logger.error("说明书向量库检索失败(异步)", query=query, error=str(e))
             raise

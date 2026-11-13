@@ -25,9 +25,8 @@ async def chat(request: ChatRequest) -> AgentResponse:
 
     try:
         return await process_query(
-            query=request.query,
+            user_query=request.query,
             session_id=request.session_id,
-            user_id=request.user_id,
         )
     except ValueError as e:
         logger.warning("对话请求参数无效", error=str(e))

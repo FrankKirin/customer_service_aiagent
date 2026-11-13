@@ -130,62 +130,15 @@ graph TB
 
 ## 4. 父图与子图的 State 数据契约
 
-### 共享State定义:
-```python
-class SharedState(BaseModel):
-    # 用户输入
-    query: str
-    user_id: str
-    session_id: str
-    
-    # 路由信息
-    query_type: Literal["policy", "manual", "general"] = "general"
-    missing_info: List[str] = []  # 缺失的关键信息列表
-    confidence: float = 0.0  # 路由置信度
-    
-    # 澄清管理
-    clarification_needed: bool = False
-    clarification_question: str = ""
-    clarified_info: Dict[str, Any] = {}  # 已澄清的信息
-    
-    # 检索结果
-    retrieved_docs: List[Document] = []  # 检索到的文档片段
-    source_info: List[SourceInfo] = []   # 来源信息
-    retrieval_confidence: float = 0.0    # 检索置信度
-    
-    # 响应生成
-    response: str = ""
-    source_citations: List[Citation] = []  # 引用的来源
-    should_escalate: bool = False          # 是否需要转人工
-    
-    # 元数据
-    timestamp: datetime = Field(default_factory=datetime.now)
-    processing_time_ms: float = 0.0
-```
+State 设计已改为“薄父图 + 独立子图”，以 `docs/design/agent_state_design.md` 为准。
 
-### 子图State扩展:
-
-#### PolicyAgentState (继承SharedState):
-```python
-class PolicyAgentState(SharedState):
-    product_line: Optional[str] = None
-    region: Optional[str] = None
-    policy_applicability: str = "unknown"  # applicable/not_applicable/conditional
-    policy_conditions: Dict[str, Any] = {}  # 适用条件
-    policy_summary: str = ""
-    policy_violations: List[str] = []  # 查询中不符合政策的地方
-```
-
-#### ManualAgentState (继承SharedState):
-```python
-class ManualAgentState(SharedState):
-    product_model: Optional[str] = None
-    product_version: Optional[str] = None
-    issue_type: Optional[str] = None  # operation/maintenance/troubleshooting
-    step_by_step_guide: bool = False  # 是否需要步骤指导
-    safety_warnings: List[str] = []   # 安全警告
-    tools_needed: List[str] = []      # 所需工具
-```
+- 父图：`OrchestratorState`，只保存跨轮/对外/决策字段；
+- 政策子图：`PolicyAgentState`，输入 `{user_query, context_query}`；
+- 说明书子图：`ManualAgentState`，输入 `{user_query, context_query}`；
+- 子图统一输出 `{final_answer, source_citations, should_escalate, needs_clarification, clarification_question}`；
+- 父图通过 `policy_wrapper_node` / `manual_wrapper_node` 完成契约翻译；
+- `documents` 是真实 `List[Document]`，不是 embedding 向量；
+- 父图与子图不再继承 `SharedState`。
 
 ## 5. Tool 的定义和参数 Schema
 

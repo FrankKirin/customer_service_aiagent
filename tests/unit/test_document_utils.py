@@ -5,9 +5,8 @@ from langchain_core.documents import Document
 from agent.state import SourceInfo
 from agent.utils.documents import (
     build_citations,
-    build_source_info,
-    calculate_retrieval_confidence,
     normalize_documents,
+    source_info_from_document,
 )
 
 
@@ -57,9 +56,10 @@ def test_build_citations_returns_empty_without_documents():
     assert build_citations(["S1"], [], "policy") == []
 
 
-def test_source_info_and_confidence_only_use_real_metadata():
+def test_source_info_only_uses_real_metadata():
     document = _document()
-    source = build_source_info([document], "policy")[0]
+    source = source_info_from_document(document, "policy")
 
+    assert source is not None
     assert source.source_id == "keg_after_sales_policy_2026"
-    assert calculate_retrieval_confidence([document]) == 0.9
+    assert source.relevance_score == 0.9

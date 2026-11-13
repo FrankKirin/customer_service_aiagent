@@ -109,6 +109,7 @@ def _matched_keywords(text: str, keywords: tuple[str, ...]) -> list[str]:
     return [keyword for keyword in keywords if keyword in text]
 
 
+# 可能返回RuleRoutingResult对象，也有可能返回None
 def classify_by_rules(query: str) -> Optional[RuleRoutingResult]:
     """只对明显单向命中的问题返回结果。"""
 
