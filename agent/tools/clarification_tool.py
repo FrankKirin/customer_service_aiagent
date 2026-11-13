@@ -16,6 +16,12 @@ from core.logger import logger
 
 # 澄清问题模板: key 对应 SharedState.missing_info 中的字段名
 FIELD_PROMPTS: Dict[str, str] = {
+    "query_scope": "请问您想咨询售后政策（退换/保修/收费），还是产品使用/故障排查？",
+    "purchase_channel": "请问您是通过线上商城、电视、电话、邮购购买，还是线下门店购买？",
+    "received_days": "请问您收到产品多长时间了？",
+    "fault_type": "请问具体是什么故障或异常现象？",
+    "repair_count": "请问同一种性能故障已经维修过几次？",
+    "warranty_proof": "请问您是否还在三包有效期内，并能提供有效购机凭证？",
     "product_model": "请问您的产品具体型号是什么？",
     "product_line": "请问您的产品属于哪个产品线？",
     "region": "请问您所在的地区是？",

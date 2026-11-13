@@ -1,17 +1,37 @@
-from fastapi import APIRouter
-from fastapi.responses import StreamingResponse
+"""客服对话 API。"""
 
-from llm.base_llm import chat_stream
+import openai
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+from core.logger import logger
+from agent.main_graph import process_query
+from agent.state import AgentResponse
 
 router = APIRouter()
 
-@router.get("/chat")
-async def chat(query: str):
-    async def event_generator(): # 从LLM获取数据块，将数据格式化为SSE格式，逐块交给FastAPI发送
-        async for chunk in chat_stream(query):
-            yield f"data: {chunk}\n\n"
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-steam",
-    )
+class ChatRequest(BaseModel):
+    """对话请求。"""
+
+    query: str = Field(min_length=1, description="用户问题")
+    session_id: str = Field(min_length=1, description="会话ID，多轮对话必须复用")
+    user_id: str | None = Field(default=None, description="用户ID")
+
+
+@router.post("/chat", response_model=AgentResponse)
+async def chat(request: ChatRequest) -> AgentResponse:
+    """处理一轮客服对话。"""
+
+    try:
+        return await process_query(
+            query=request.query,
+            session_id=request.session_id,
+            user_id=request.user_id,
+        )
+    except ValueError as e:
+        logger.warning("对话请求参数无效", error=str(e))
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except openai.APIError as e:
+        logger.error("对话服务模型调用失败", error=str(e))
+        raise HTTPException(status_code=503, detail="模型服务暂时不可用，请稍后重试") from e
