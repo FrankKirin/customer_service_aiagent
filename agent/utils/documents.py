@@ -130,6 +130,11 @@ def source_info_from_document(
 def _parse_used_source_indexes(
     used_sources: List[str], document_count: int
 ) -> List[int]:
+    """
+        输入: 
+        处理: 
+        输出:
+    """
     indexes: List[int] = []
     for item in used_sources:
         if not isinstance(item, str):

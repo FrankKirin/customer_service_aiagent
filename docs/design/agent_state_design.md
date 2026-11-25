@@ -16,12 +16,14 @@ State字段只有满足以下条件材质的保留
     -messages: 历史消息
     -source_citations: 来源引用list[Citation]
     -should_escalate: 是否需要人工介入，True/False
+
 policy子图State:
     -documents:List[Document]:rag查询返回的文档向量
     -policy_applicability:applicable, not_applicable, conditional, unknow: 政策适用性判断
     -policy_conditions:list[str]: 政策适用需要满足的条件
     -policy_violations: 用户当前情况与政策不符的地方
     -retrieval_confidence: 根据检索文档真实relevance_score计算出的平均检索置信度
+
 manual子图State：
     -documents: rag检索返回的向量文档
     -issue_type: operation/ maintenance / troubleshooting：说明书问题类型

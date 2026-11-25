@@ -56,10 +56,11 @@ async def finalize_node(state: OrchestratorState) -> dict:
         response = (
             state.clarification_question.strip()
             or state.final_answer.strip()
-            or _EMPTY_CLARIFICATION_FALLBACK
+            or _EMPTY_CLARIFICATION_FALLBACK  # 兜底
         )
         should_escalate = False
     else:
+        # 如果不需要澄清
         response = state.final_answer.strip()
         should_escalate = state.should_escalate
         if not response:
@@ -73,3 +74,12 @@ async def finalize_node(state: OrchestratorState) -> dict:
         "should_escalate": should_escalate,
         "messages": [AIMessage(content=response)],
     }
+"""
+需要澄清:
+    - 返回澄清的反问问题
+不需要澄清：
+    - response为空
+        - 兜底回答，设置转人工标记为True
+    - response不为空
+        - 加入引用来源
+"""

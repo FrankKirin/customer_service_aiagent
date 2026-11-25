@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import anyio.to_thread
 import chromadb
+import chromadb.errors
 import openai
 from chromadb.config import Settings
 from langchain_community.vectorstores import Chroma

@@ -41,6 +41,7 @@ def _build_question(missing_fields: List[str]) -> str:
     if not missing_fields:
         raise ValueError("缺失信息字段列表不能为空")
 
+    # 根据第一个missing_fields字段，获取澄清问题, 如果field为空，生成反问问题
     field = missing_fields[0]
     return FIELD_PROMPTS.get(field, f"请问{field}是什么？")
 

@@ -9,11 +9,13 @@ from typing import Any, Dict, Type, TypeVar
 
 from pydantic import BaseModel
 
+# 要求ModelT必须是BaseModel的子类
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 def extract_json_object(content: str) -> Dict[str, Any]:
     """从模型输出中提取第一个完整 JSON 对象。"""
+    # 1.判断是否为空
 
     if not isinstance(content, str) or not content.strip():
         raise ValueError("模型输出为空")

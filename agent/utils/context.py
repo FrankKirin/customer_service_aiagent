@@ -79,9 +79,11 @@ def build_contextual_query(
     """
 
     current = user_query.strip()
+    # limit默认为4
     history = recent_user_questions(messages, limit=limit + 1)
     if history and history[-1] == current:
         history = history[:-1]
+    # 取最后N条，顺序保持不变
     history = history[-limit:]
 
     return _join_with_budget(

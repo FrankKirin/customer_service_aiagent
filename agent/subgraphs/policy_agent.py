@@ -50,6 +50,7 @@ def _subgraph_query(state: PolicyAgentState) -> str:
 
 
 def _no_policy_documents_response() -> dict:
+    """没有文档，转人工"""
     return {
         "final_answer": NO_POLICY_DOCUMENTS_ANSWER,
         "source_citations": [],
@@ -95,7 +96,11 @@ async def policy_retrieve_node(state: PolicyAgentState) -> dict:
 
 
 async def policy_analyze_node(state: PolicyAgentState) -> dict:
-    """依据真实政策原文生成结构化回答和引用。"""
+    """依据真实政策原文生成结构化回答和引用。
+       处理:
+            拿到json的response，如果有follow_up_question，就不升级人工处理
+            澄清逻辑：如果需要澄清，就不升级人工客服，否则信息不足转人工；引用为空转人工
+    """
 
     documents = state.documents
     if not documents:
@@ -123,6 +128,7 @@ async def policy_analyze_node(state: PolicyAgentState) -> dict:
             "policy_applicability": "unknown",
         }
 
+    # 构造引用来源
     citations = build_citations(
         answer.used_sources,
         documents,
@@ -162,7 +168,6 @@ async def policy_analyze_node(state: PolicyAgentState) -> dict:
         "policy_conditions": answer.conditions,
         "policy_violations": answer.violations,
     }
-
 
 def build_policy_agent():
     """编译政策问答子图。"""

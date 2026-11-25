@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import chromadb
+import chromadb.errors
 import openai
 from langchain_core.documents import Document
 from langchain_core.tools import StructuredTool
@@ -72,7 +73,11 @@ def _build_filter_conditions(
 
 
 def _attach_source_info(documents: List[Document]) -> List[Document]:
-    """为文档补充来源信息(写回 metadata 的 source_info)"""
+    """为文档补充来源信息(写回 metadata 的 source_info)
+       输入: 向量检索检索回来的Document列表
+       处理: 查看每个Document的元数据，如果有source_info，就跳过看下一个;如果没有创建SourceInfo
+       输出: 处理后的Document列表
+    """
     for doc in documents:
         metadata = doc.metadata
         if "source_info" in metadata:
@@ -136,6 +141,7 @@ def create_policy_retriever_tool() -> StructuredTool:
             raise ValueError("查询文本不能为空")
 
         top_k = kwargs.get("top_k", 5)
+        # policy的filter_condition目前有product_line, region和date_range
         filter_conditions = _build_filter_conditions(
             product_line=kwargs.get("product_line"),
             region=kwargs.get("region"),

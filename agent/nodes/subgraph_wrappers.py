@@ -96,9 +96,16 @@ def translate_subgraph_output(result: Any) -> Dict[str, Any]:
 
 
 def _build_wrapper_node(graph: Any, node_name: str):
+    """
+        工厂函数，创建异步包装节点，作为父图和子图之间的适配器
+        输入：子图，节点名
+        处理：调用子图跑出结果，更新到父图
+        输出：返回一个dict
+    """
     async def wrapper_node(state: OrchestratorState) -> dict:
+        # 子图的ainvoke方法异步，包装器必须是异步才能使用await
         result = await graph.ainvoke(build_subgraph_input(state))
-        update = translate_subgraph_output(result)
+        update = translate_subgraph_output(result)  # 子图结果更新到父图状态
         logger.info(
             "子图执行完成",
             node=node_name,

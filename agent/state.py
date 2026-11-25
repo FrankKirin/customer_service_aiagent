@@ -16,8 +16,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class SourceInfo(BaseModel):
-    """可展示给用户的来源信息。"""
+    """可展示给用户的来源信息。
+       __str__会在打印的时候追加一些必要的前缀
+    """
 
+    # BaseModel类的字段声明会自动生成init方法
     source_id: str
     source_type: Literal["policy", "manual"] = "policy"
     section: Optional[str] = None
@@ -153,6 +156,7 @@ class OrchestratorState(BaseModel):
     )
     should_escalate: bool = Field(default=False, description="是否需要转人工")
 
+    # 允许Pydantic模型接受任意类型字段，不强求字段必须是Pydasntic认识的基础类型
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
@@ -161,8 +165,10 @@ class AgentResponse(BaseModel):
 
     response: str
     query_type: Literal["policy", "manual", "general"]
+
     source_citations: List[Citation] = Field(default_factory=list)  # 引用来源
     should_escalate: bool = False   # 是否转人工
+
     needs_clarification: bool = False  # 是否需要澄清
     clarification_question: str = ""
     processing_time_ms: float = 0.0   # 处理时间，偏运维观测
